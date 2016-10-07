@@ -5,3 +5,6 @@
 /Smpp/obj/Debug
 /Smpp.Tests/obj/Debug
 /.vs/SMSGate/v14/.suo
+/packages/NUnit.3.5.0
+/Smpp/bin/Debug
+/Smpp.Tests/bin/Debug

@@ -40,8 +40,35 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Client.cs" />
+    <Compile Include="Common.cs" />
+    <Compile Include="Connection.cs" />
+    <Compile Include="Events\GateEvents.cs" />
+    <Compile Include="Events\LogEvent.cs" />
+    <Compile Include="Exceptions\CommandLengthException.cs" />
+    <Compile Include="Gate.cs" />
+    <Compile Include="Pdu.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Requests\BindReceiver.cs" />
+    <Compile Include="Requests\BindTransceiver.cs" />
+    <Compile Include="Requests\BindTransmitter.cs" />
+    <Compile Include="Requests\DataSm.cs" />
+    <Compile Include="Requests\DeliverSm.cs" />
+    <Compile Include="Requests\EnquireLink.cs" />
+    <Compile Include="Requests\SubmitSm.cs" />
+    <Compile Include="Requests\Unbind.cs" />
+    <Compile Include="Responses\BindReceiverResp.cs" />
+    <Compile Include="Responses\BindTranseiverResp.cs" />
+    <Compile Include="Responses\BindTransmitterResp.cs" />
+    <Compile Include="Responses\DataSmResp.cs" />
+    <Compile Include="Responses\DeliverSmResp.cs" />
+    <Compile Include="Responses\EnquireLinkResp.cs" />
+    <Compile Include="Responses\GenericNack.cs" />
+    <Compile Include="Responses\SubmitSmResp.cs" />
+    <Compile Include="Responses\UnbindResp.cs" />
+    <Compile Include="Server.cs" />
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
        Other similar extension points exist, see Microsoft.Common.targets.
