@@ -1,0 +1,7 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/Smpp/obj/Debug
+/Smpp.Tests/obj/Debug
+/.vs/SMSGate/v14/.suo
