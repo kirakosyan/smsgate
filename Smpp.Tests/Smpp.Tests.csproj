@@ -44,6 +44,15 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Commands\bind_tranceiver_test.cs" />
+    <Compile Include="Commands\deliver_sm_test.cs" />
+    <Compile Include="Commands\enquire_link_resp_test.cs" />
+    <Compile Include="Commands\enquire_link_test.cs" />
+    <Compile Include="Commands\generic_nack_test.cs" />
+    <Compile Include="CommonTest.cs" />
+    <Compile Include="Integration\BindReceiverTest.cs" />
+    <Compile Include="Integration\BindTransmitterTest.cs" />
+    <Compile Include="Integration\SmokeTest.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="SmokeTest.cs" />
   </ItemGroup>
