@@ -9,3 +9,5 @@
 /Smpp/bin/Debug
 /Smpp.Tests/bin/Debug
 /.vs/SMSGate/v15
+/Smpp.Tests/obj
+/Smpp/obj

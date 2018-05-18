@@ -1,80 +1,8 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="14.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{5A02A194-EC93-408A-8AA0-1BB754C78DC8}</ProjectGuid>
-    <OutputType>Library</OutputType>
-    <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>Smpp</RootNamespace>
-    <AssemblyName>Smpp</AssemblyName>
-    <TargetFrameworkVersion>v4.5.2</TargetFrameworkVersion>
-    <FileAlignment>512</FileAlignment>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
-    <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <DebugType>pdbonly</DebugType>
-    <Optimize>true</Optimize>
-    <OutputPath>bin\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
+    <TargetFramework>netcoreapp2.0</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="System" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.Xml.Linq" />
-    <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Data" />
-    <Reference Include="System.Net.Http" />
-    <Reference Include="System.Xml" />
+    <Folder Include="Properties\" />
   </ItemGroup>
-  <ItemGroup>
-    <Compile Include="Client.cs" />
-    <Compile Include="Common.cs" />
-    <Compile Include="Connection.cs" />
-    <Compile Include="Events\GateEvents.cs" />
-    <Compile Include="Events\LogEvent.cs" />
-    <Compile Include="Exceptions\CommandLengthException.cs" />
-    <Compile Include="Gate.cs" />
-    <Compile Include="Pdu.cs" />
-    <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="Requests\BindReceiver.cs" />
-    <Compile Include="Requests\BindTransceiver.cs" />
-    <Compile Include="Requests\BindTransmitter.cs" />
-    <Compile Include="Requests\DataSm.cs" />
-    <Compile Include="Requests\DeliverSm.cs" />
-    <Compile Include="Requests\EnquireLink.cs" />
-    <Compile Include="Requests\SubmitSm.cs" />
-    <Compile Include="Requests\Unbind.cs" />
-    <Compile Include="Responses\BindReceiverResp.cs" />
-    <Compile Include="Responses\BindTranseiverResp.cs" />
-    <Compile Include="Responses\BindTransmitterResp.cs" />
-    <Compile Include="Responses\DataSmResp.cs" />
-    <Compile Include="Responses\DeliverSmResp.cs" />
-    <Compile Include="Responses\EnquireLinkResp.cs" />
-    <Compile Include="Responses\GenericNack.cs" />
-    <Compile Include="Responses\SubmitSmResp.cs" />
-    <Compile Include="Responses\UnbindResp.cs" />
-    <Compile Include="Server.cs" />
-  </ItemGroup>
-  <ItemGroup />
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-  <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
-       Other similar extension points exist, see Microsoft.Common.targets.
-  <Target Name="BeforeBuild">
-  </Target>
-  <Target Name="AfterBuild">
-  </Target>
-  -->
 </Project>
