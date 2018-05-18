@@ -2,12 +2,9 @@
 # This .gitignore file was automatically created by Microsoft(R) Visual Studio.
 ################################################################################
 
-/Smpp/obj/Debug
-/Smpp.Tests/obj/Debug
-/.vs/SMSGate/v14/.suo
-/packages/NUnit.3.5.0
-/Smpp/bin/Debug
-/Smpp.Tests/bin/Debug
-/.vs/SMSGate/v15
-/Smpp.Tests/obj
 /Smpp/obj
+/Smpp.Tests/obj
+/Smpp/bin
+/Smpp.Tests/bin
+/.vs
+/packages
