@@ -5,7 +5,7 @@ namespace Smpp.Tests
     [TestFixture]
     public class CommonTests
     {
-        private string _8bitString = "Í<è§é vy>Ë 9]v";
+        private string _8bitString = "Í<è\u0006\u0012§é\u00A0vy>\u000F\u009FË\u00A09]\u009Ev\u009F\u0001";
         private string _string = "My 7 bit message string";
         private string _stringHex = "4D79203720626974206D65737361676520737472696E67";
 

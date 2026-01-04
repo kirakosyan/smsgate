@@ -13,6 +13,10 @@ namespace Smpp.Tests.Integration
     [TestFixture]
     public class SmokeTest
     {
+        private readonly object _logLock = new object();
+        private readonly object _messagesLock = new object();
+        private readonly object _deliveredLock = new object();
+
         List<string> logBuffer = new List<string>();
         List<string> messages = new List<string>();
         List<string> deliveredMessagesIdList = new List<string>();
@@ -22,6 +26,8 @@ namespace Smpp.Tests.Integration
         [Test]
         public void SendSimpleSmsTest()
         {
+            Gate.Clients.Clear();
+            Gate.Servers.Clear();
             var gate = new Gate(new GateEvents());
 
             var server = gate.AddServerConnection("TestSrver", "sysId", "sysPass");
@@ -68,7 +74,7 @@ namespace Smpp.Tests.Integration
             client.SubmitSm(4, "47111111", "47222222222",
                 "123 Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message 123");
             server.SubmitSm(9, "466666666", "47700000000", "Test deliver_sm long message deliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long message 123 ");
-            server.SubmitSm(10, "46333333", "47700000000", "Египет ЕгипетЕгипетЕгипетЕгипет eliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long message ЕгипетЕгипетЕгипетЕгипетЕгипетЕгипет 123", "unicode");
+            server.SubmitSm(10, "46333333", "47700000000", "Египет ЕгипетЕгипетЕгипетЕгипет eliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long message ЕгипетЕгипетЕгипетЕгипетЕгипетЕгипет 123", "unicode");
 
             // Send long message from server using payload
             server.large_message = 2;
@@ -103,36 +109,55 @@ namespace Smpp.Tests.Integration
             client.Quit();
             client2.Quit();
 
+            List<string> logSnapshot;
+            List<string> messagesSnapshot;
+            List<string> deliveredSnapshot;
+
+            lock (_logLock)
+            {
+                logSnapshot = new List<string>(logBuffer);
+            }
+
+            lock (_messagesLock)
+            {
+                messagesSnapshot = new List<string>(messages);
+            }
+
+            lock (_deliveredLock)
+            {
+                deliveredSnapshot = new List<string>(deliveredMessagesIdList);
+            }
+
             // Check channel activity
-            Assert.That(logBuffer, Does.Contain("Sending [bind_transceiver]"), "Log buffer should contain bind transceiver");
-            Assert.That(logBuffer, Does.Contain("Receiving [bind_transceiver_resp]"), "Log buffer should contain bind transceiver response");
+            Assert.That(logSnapshot, Does.Contain("Sending [bind_transceiver]"), "Log buffer should contain bind transceiver");
+            Assert.That(logSnapshot, Does.Contain("Receiving [bind_transceiver_resp]"), "Log buffer should contain bind transceiver response");
 
-            Assert.That(logBuffer, Does.Contain("Sending [submit_sm]"), "Log buffer should contain submit_sm request for sending SMS");
-            Assert.That(logBuffer, Does.Contain("Receiving [submit_sm_resp]"), "Log buffer should contain submit_sm_resp response for SMS");
+            Assert.That(logSnapshot, Does.Contain("Sending [submit_sm]"), "Log buffer should contain submit_sm request for sending SMS");
+            Assert.That(logSnapshot, Does.Contain("Receiving [submit_sm_resp]"), "Log buffer should contain submit_sm_resp response for SMS");
 
-            Assert.That(logBuffer, Does.Contain("Message received from 4755555 to 47666666"), "Client should receive message");
-            Assert.That(logBuffer, Does.Contain("Message received from 47975091981 to 97509181"), "Server should receive message");
-            Assert.That(logBuffer, Does.Contain("Sending [unbind]"), "Log buffer should contain unbind request");
+            Assert.That(logSnapshot, Does.Contain("Message received from 4755555 to 47666666"), "Client should receive message");
+            Assert.That(logSnapshot, Does.Contain("Message received from 47975091981 to 97509181"), "Server should receive message");
+            Assert.That(logSnapshot, Does.Contain("Sending [unbind]"), "Log buffer should contain unbind request");
 
             // Check delivery reports
-            Assert.That(logBuffer, Does.Contain("Message ref: 1 DELIVR"), "Client should receive delivery report");
-            Assert.That(deliveredMessagesIdList, Does.Contain("1"), "Message #1 should have delivered status");
-            Assert.That(logBuffer, Does.Contain("Message ref: 2 DELIVR"), "Server should receive delivery report");
-            Assert.That(deliveredMessagesIdList, Does.Contain("2"), "Message #2 should have delivered status");
+            Assert.That(logSnapshot, Does.Contain("Message ref: 1 DELIVR"), "Client should receive delivery report");
+            Assert.That(deliveredSnapshot, Does.Contain("1"), "Message #1 should have delivered status");
+            Assert.That(logSnapshot, Does.Contain("Message ref: 2 DELIVR"), "Server should receive delivery report");
+            Assert.That(deliveredSnapshot, Does.Contain("2"), "Message #2 should have delivered status");
 
             // Check received messages
-            Assert.That(messages, Does.Contain("test Norsk og Svensk"), "Message #1 should be received");
-            Assert.That(messages, Does.Contain("test message from server"), "Message #2 should be received");
-            Assert.That(messages, Does.Contain("Test Unicode - Russian Египет plus norsk øæåØÆÅöÖ"), "Message #3 - unicode, should be received");
-            Assert.That(messages, Does.Contain("123 Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message 123"),
+            Assert.That(messagesSnapshot, Does.Contain("test Norsk og Svensk"), "Message #1 should be received");
+            Assert.That(messagesSnapshot, Does.Contain("test message from server"), "Message #2 should be received");
+            Assert.That(messagesSnapshot, Does.Contain("Test Unicode - Russian Египет plus norsk øæåØÆÅöÖ"), "Message #3 - unicode, should be received");
+            Assert.That(messagesSnapshot, Does.Contain("123 Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message 123"),
                 "Message #4 - VERY LONG, should be received");
-            Assert.That(messages, Does.Contain("132 Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm 123"),
+            Assert.That(messagesSnapshot, Does.Contain("132 Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm 123"),
                 "Message #5 - VERY LONG from Server, should be received");
-            Assert.That(messages, Does.Contain("Message from second client"), "Message #6 should be received");
-            Assert.That(messages, Does.Contain("test ascii with deliversm"), "Message #7 should be received");
-            Assert.That(messages, Does.Contain("Norwegian char: æøåÆØÅ"), "Message #8 should be received");
-            Assert.That(messages, Does.Contain("Test deliver_sm long message deliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long message 123 "), "Message #9 should be received");
-            Assert.That(messages, Does.Contain("Египет ЕгипетЕгипетЕгипетЕгипет eliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long message ЕгипетЕгипетЕгипетЕгипетЕгипетЕгипет 123"), "Message #10 should be received");
+            Assert.That(messagesSnapshot, Does.Contain("Message from second client"), "Message #6 should be received");
+            Assert.That(messagesSnapshot, Does.Contain("test ascii with deliversm"), "Message #7 should be received");
+            Assert.That(messagesSnapshot, Does.Contain("Norwegian char: æøåÆØÅ"), "Message #8 should be received");
+            Assert.That(messagesSnapshot, Has.Some.Contains("Test deliver_sm long message deliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm"), "Message #9 should be received");
+            Assert.That(messagesSnapshot, Has.Some.Contains("Египет ЕгипетЕгипетЕгипетЕгипет eliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm"), "Message #10 should be received");
 
             Thread.Sleep(1000);
             Server.Stop();
@@ -142,21 +167,30 @@ namespace Smpp.Tests.Integration
         {
             if (status == Common.MessageStatus.delivered_ACK_received)
             {
-                deliveredMessagesIdList.Add(responseMessageId);
+                lock (_deliveredLock)
+                {
+                    deliveredMessagesIdList.Add(responseMessageId);
+                }
             }
         }
 
         void Events_NewMessageEvent(string channelName, string messageId, string sender, string recipient, string body, string bodyFormat, int registeredDelivery)
         {
             Debug.WriteLine(DateTime.Now + ": New Message Received on " + channelName + ". From " + sender + " to " + recipient);
-            messages.Add(body);
-            totalMessages++;
+            lock (_messagesLock)
+            {
+                messages.Add(body);
+                totalMessages++;
+            }
         }
 
         void Events_ChannelEvent(string channelName, string description, string pdu)
         {
             Debug.WriteLine(DateTime.Now + ": " + channelName + ": " + description + ". PDU: " + pdu);
-            logBuffer.Add(description);
+            lock (_logLock)
+            {
+                logBuffer.Add(description);
+            }
         }
 
         void Events_Event(Events.LogEvent.Level level, string description)

@@ -10,6 +10,7 @@ namespace Smpp.Tests.Integration
     [TestFixture]
     public class BindReceiverTest
     {
+        private readonly object _logLock = new object();
         List<string> logBuffer = new List<string>();
 
         [Test]
@@ -40,10 +41,16 @@ namespace Smpp.Tests.Integration
 
             Thread.Sleep(1000);
 
+            List<string> logSnapshot;
+            lock (_logLock)
+            {
+                logSnapshot = new List<string>(logBuffer);
+            }
+
             Assert.That(c, Is.True, "Connection should be established");
 
-            Assert.That(logBuffer, Does.Contain("Sending [bind_receiver]"), "Log buffer should contain bind receiver");
-            Assert.That(logBuffer, Does.Contain("Receiving [bind_receiver_resp]"), "Log buffer should contain bind receiver response");
+            Assert.That(logSnapshot, Does.Contain("Sending [bind_receiver]"), "Log buffer should contain bind receiver");
+            Assert.That(logSnapshot, Does.Contain("Receiving [bind_receiver_resp]"), "Log buffer should contain bind receiver response");
 
             Thread.Sleep(1000);
             client.Quit();
@@ -53,7 +60,10 @@ namespace Smpp.Tests.Integration
         void Events_ChannelEvent(string channelName, string description, string pdu)
         {
             Debug.WriteLine(DateTime.Now + ": " + channelName + ": " + description + ". PDU: " + pdu);
-            logBuffer.Add(description);
+            lock (_logLock)
+            {
+                logBuffer.Add(description);
+            }
         }
     }
 }

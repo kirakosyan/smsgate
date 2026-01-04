@@ -594,8 +594,13 @@ namespace Smpp.Requests
                 {
                     if (is_multipart)
                     {
-                        part_message = short_message.Substring((part - 1) * 67,
-                            short_message.Substring((part - 1) * 67 + (part == 1 ? 0 : 1)).Length > 67 ? 67 : short_message.Substring((part - 1) * 67).Length);
+                        var segmentLength = Common.UNICODE_MESSAGE_SPLIT_BASE;
+                        var startIndex = (part - 1) * segmentLength;
+                        var availableLength = Math.Max(0, short_message.Length - startIndex);
+                        var takeLength = Math.Min(segmentLength, availableLength);
+                        part_message = availableLength > 0
+                            ? short_message.Substring(startIndex, takeLength)
+                            : string.Empty;
                     }
                     else
                     {
