@@ -15,8 +15,8 @@ namespace Smpp.Tests.Commands
             var pdu = new DeliverSm(rawPdu.Replace(" ", ""));
             pdu.Decode();
 
-            Assert.AreEqual("4797509181", pdu.Sender);
-            Assert.AreEqual("BSS Test 301115 kl 1550", pdu.Body);
+            Assert.That(pdu.Sender, Is.EqualTo("4797509181"));
+            Assert.That(pdu.Body, Is.EqualTo("BSS Test 301115 kl 1550"));
         }
 
         [Test]
@@ -25,8 +25,8 @@ namespace Smpp.Tests.Commands
             var pdu = new DeliverSm(rawPduLatin.Replace(" ", ""));
             pdu.Decode();
 
-            Assert.AreEqual("4797509181", pdu.Sender);
-            Assert.AreEqual("Norwegian char: æøåÆØÅ", pdu.Body);
+            Assert.That(pdu.Sender, Is.EqualTo("4797509181"));
+            Assert.That(pdu.Body, Is.EqualTo("Norwegian char: æøåÆØÅ"));
         }
     }
 }

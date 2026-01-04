@@ -14,7 +14,7 @@ namespace Smpp.Tests.Commands
             var pdu = new EnquireLink();
             pdu.sequence_number = 1;
 
-            Assert.AreEqual(rawPdu, pdu.Encode(), "enquire_link should be properly encoded");
+            Assert.That(pdu.Encode(), Is.EqualTo(rawPdu), "enquire_link should be properly encoded");
         }
 
         [Test]
@@ -22,8 +22,8 @@ namespace Smpp.Tests.Commands
         {
             var pdu = new EnquireLink(rawPdu);
 
-            Assert.AreEqual(1, (int)pdu.sequence_number, "enquire_link sequence number should match");
-            Assert.AreEqual((uint)0x00000015, (uint)pdu.command_id, "Command_id should be enquire_link");
+            Assert.That((int)pdu.sequence_number, Is.EqualTo(1), "enquire_link sequence number should match");
+            Assert.That((uint)pdu.command_id, Is.EqualTo((uint)0x00000015), "Command_id should be enquire_link");
         }
     }
 }

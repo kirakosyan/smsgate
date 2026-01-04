@@ -49,8 +49,8 @@ namespace Smpp.Tests.Integration
             var c = client.Connect();
             var c2 = client2.Connect();
 
-            Assert.IsTrue(c, "Connection should be established");
-            Assert.IsTrue(c2, "2nd Connection should be established");
+            Assert.That(c, Is.True, "Connection should be established");
+            Assert.That(c2, Is.True, "2nd Connection should be established");
 
             Thread.Sleep(1000);
 
@@ -104,35 +104,35 @@ namespace Smpp.Tests.Integration
             client2.Quit();
 
             // Check channel activity
-            Assert.IsTrue(logBuffer.Contains("Sending [bind_transceiver]"), "Log buffer should contain bind transceiver");
-            Assert.IsTrue(logBuffer.Contains("Receiving [bind_transceiver_resp]"), "Log buffer should contain bind transceiver response");
+            Assert.That(logBuffer, Does.Contain("Sending [bind_transceiver]"), "Log buffer should contain bind transceiver");
+            Assert.That(logBuffer, Does.Contain("Receiving [bind_transceiver_resp]"), "Log buffer should contain bind transceiver response");
 
-            Assert.IsTrue(logBuffer.Contains("Sending [submit_sm]"), "Log buffer should contain submit_sm request for sending SMS");
-            Assert.IsTrue(logBuffer.Contains("Receiving [submit_sm_resp]"), "Log buffer should contain submit_sm_resp response for SMS");
+            Assert.That(logBuffer, Does.Contain("Sending [submit_sm]"), "Log buffer should contain submit_sm request for sending SMS");
+            Assert.That(logBuffer, Does.Contain("Receiving [submit_sm_resp]"), "Log buffer should contain submit_sm_resp response for SMS");
 
-            Assert.IsTrue(logBuffer.Contains("Message received from 4755555 to 47666666"), "Client should receive message");
-            Assert.IsTrue(logBuffer.Contains("Message received from 47975091981 to 97509181"), "Server should receive message");
-            Assert.IsTrue(logBuffer.Contains("Sending [unbind]"), "Log buffer should contain unbind request");
+            Assert.That(logBuffer, Does.Contain("Message received from 4755555 to 47666666"), "Client should receive message");
+            Assert.That(logBuffer, Does.Contain("Message received from 47975091981 to 97509181"), "Server should receive message");
+            Assert.That(logBuffer, Does.Contain("Sending [unbind]"), "Log buffer should contain unbind request");
 
             // Check delivery reports
-            Assert.IsTrue(logBuffer.Contains("Message ref: 1 DELIVR"), "Client should receive delivery report");
-            Assert.IsTrue(deliveredMessagesIdList.Contains("1"), "Message #1 should have delivered status");
-            Assert.IsTrue(logBuffer.Contains("Message ref: 2 DELIVR"), "Server should receive delivery report");
-            Assert.IsTrue(deliveredMessagesIdList.Contains("2"), "Message #2 should have delivered status");
+            Assert.That(logBuffer, Does.Contain("Message ref: 1 DELIVR"), "Client should receive delivery report");
+            Assert.That(deliveredMessagesIdList, Does.Contain("1"), "Message #1 should have delivered status");
+            Assert.That(logBuffer, Does.Contain("Message ref: 2 DELIVR"), "Server should receive delivery report");
+            Assert.That(deliveredMessagesIdList, Does.Contain("2"), "Message #2 should have delivered status");
 
             // Check received messages
-            Assert.IsTrue(messages.Contains("test Norsk og Svensk"), "Message #1 should be received");
-            Assert.IsTrue(messages.Contains("test message from server"), "Message #2 should be received");
-            Assert.IsTrue(messages.Contains("Test Unicode - Russian Египет plus norsk øæåØÆÅöÖ"), "Message #3 - unicode, should be received");
-            Assert.IsTrue(messages.Contains("123 Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message 123"),
+            Assert.That(messages, Does.Contain("test Norsk og Svensk"), "Message #1 should be received");
+            Assert.That(messages, Does.Contain("test message from server"), "Message #2 should be received");
+            Assert.That(messages, Does.Contain("Test Unicode - Russian Египет plus norsk øæåØÆÅöÖ"), "Message #3 - unicode, should be received");
+            Assert.That(messages, Does.Contain("123 Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message Very long message 123"),
                 "Message #4 - VERY LONG, should be received");
-            Assert.IsTrue(messages.Contains("132 Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm 123"),
+            Assert.That(messages, Does.Contain("132 Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm Server also wants to send long message with deliver_sm 123"),
                 "Message #5 - VERY LONG from Server, should be received");
-            Assert.IsTrue(messages.Contains("Message from second client"), "Message #6 should be received");
-            Assert.IsTrue(messages.Contains("test ascii with deliversm"), "Message #7 should be received");
-            Assert.IsTrue(messages.Contains("Norwegian char: æøåÆØÅ"), "Message #8 should be received");
-            Assert.IsTrue(messages.Contains("Test deliver_sm long message deliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long message 123 "), "Message #9 should be received");
-            Assert.IsTrue(messages.Contains("Египет ЕгипетЕгипетЕгипетЕгипет eliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long message ЕгипетЕгипетЕгипетЕгипетЕгипетЕгипет 123"), "Message #10 should be received");
+            Assert.That(messages, Does.Contain("Message from second client"), "Message #6 should be received");
+            Assert.That(messages, Does.Contain("test ascii with deliversm"), "Message #7 should be received");
+            Assert.That(messages, Does.Contain("Norwegian char: æøåÆØÅ"), "Message #8 should be received");
+            Assert.That(messages, Does.Contain("Test deliver_sm long message deliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long message 123 "), "Message #9 should be received");
+            Assert.That(messages, Does.Contain("Египет ЕгипетЕгипетЕгипетЕгипет eliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long messagedeliver_sm long message ЕгипетЕгипетЕгипетЕгипетЕгипетЕгипет 123"), "Message #10 should be received");
 
             Thread.Sleep(1000);
             Server.Stop();

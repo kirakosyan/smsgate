@@ -40,10 +40,10 @@ namespace Smpp.Tests.Integration
 
             Thread.Sleep(1000);
 
-            Assert.IsTrue(c, "Connection should be established");
+            Assert.That(c, Is.True, "Connection should be established");
 
-            Assert.IsTrue(logBuffer.Contains("Sending [bind_receiver]"), "Log buffer should contain bind receiver");
-            Assert.IsTrue(logBuffer.Contains("Receiving [bind_receiver_resp]"), "Log buffer should contain bind receiver response");
+            Assert.That(logBuffer, Does.Contain("Sending [bind_receiver]"), "Log buffer should contain bind receiver");
+            Assert.That(logBuffer, Does.Contain("Receiving [bind_receiver_resp]"), "Log buffer should contain bind receiver response");
 
             Thread.Sleep(1000);
             client.Quit();

@@ -14,7 +14,7 @@ namespace SmppGate.Unit.Tests.Commands
             var pdu = new GenericNack();
             pdu.sequence_number = 1;
 
-            Assert.AreEqual(rawPdu, pdu.Encode(), "generic_nack should be properly encoded");
+            Assert.That(pdu.Encode(), Is.EqualTo(rawPdu), "generic_nack should be properly encoded");
         }
     }
 }

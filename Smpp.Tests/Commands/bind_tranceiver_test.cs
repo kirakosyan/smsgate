@@ -20,7 +20,7 @@ namespace Smpp.Tests.Commands
             pdu.Password = password;
             pdu.SystemType = systemType;
 
-            Assert.AreEqual(rawPdu, pdu.Encode(), "bind_tranceiver should be encoded properly");
+            Assert.That(pdu.Encode(), Is.EqualTo(rawPdu), "bind_tranceiver should be encoded properly");
         }
 
         [Test]
@@ -28,10 +28,10 @@ namespace Smpp.Tests.Commands
         {
             var pdu = new BindTransceiver(rawPdu);
 
-            Assert.AreEqual((uint)0x00000009, (uint)pdu.command_id, "Command_id should be bind_tranceiver");
-            Assert.AreEqual(systemId, pdu.SystemID, "SystemId Should match");
-            Assert.AreEqual(password, pdu.Password, "Password should match");
-            Assert.AreEqual(systemType, pdu.SystemType, "System types should match");
+            Assert.That((uint)pdu.command_id, Is.EqualTo((uint)0x00000009), "Command_id should be bind_tranceiver");
+            Assert.That(pdu.SystemID, Is.EqualTo(systemId), "SystemId Should match");
+            Assert.That(pdu.Password, Is.EqualTo(password), "Password should match");
+            Assert.That(pdu.SystemType, Is.EqualTo(systemType), "System types should match");
         }
     }
 }
