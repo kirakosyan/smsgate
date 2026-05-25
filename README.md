@@ -221,8 +221,6 @@ The implementation is usable, but there are several behaviors worth knowing befo
 
 - Connection registries are stored in static global collections, so multiple `Gate` instances share process-wide state.
 - `Server.StartAsync(...)` is fire-and-forget and does not expose a readiness signal.
-- `keep_alive` and `timeout` are exposed as configurable fields, but timer intervals are initialized in the constructor and are not refreshed when those fields are changed later.
-- The initial socket-failure path in `Client.Connect()` waits for a hard-coded 10 seconds on the caller thread before scheduling a reconnect.
 - Accepted server sessions are routed using `system_id`; duplicate server registrations with the same `system_id` can therefore become ambiguous.
 
 ## Development Notes

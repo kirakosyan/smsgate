@@ -184,15 +184,40 @@ namespace Smpp
 
         protected int queue_resend_delay = 200;
 
+        private int _keep_alive = 60000;
+        private int _timeout = 10000;
+
         /// <summary>
         /// Interval in milliseconds to send enquire link, 1 minute by default
         /// </summary>
-        public int keep_alive = 60000;
+        public int keep_alive
+        {
+            get { return _keep_alive; }
+            set
+            {
+                _keep_alive = value;
+                if (enquire_link_timer != null)
+                {
+                    enquire_link_timer.Interval = value;
+                }
+            }
+        }
 
         /// <summary>
         /// Timeout in milliseconds if remote host does not answer, 10 seconds by default
         /// </summary>
-        public int timeout = 10000;
+        public int timeout
+        {
+            get { return _timeout; }
+            set
+            {
+                _timeout = value;
+                if (timeout_timer != null)
+                {
+                    timeout_timer.Interval = value;
+                }
+            }
+        }
 
         /// <summary>
         /// The delay to reconnect after timeout or connection problem
@@ -269,6 +294,42 @@ namespace Smpp
             last_pdu_time = DateTime.Now.AddHours(-1);
         }
 
+        protected void ScheduleReconnect()
+        {
+            ScheduleReconnect(reconnectDelay);
+        }
+
+        protected virtual void ScheduleReconnect(int delayMilliseconds)
+        {
+            if (is_server)
+            {
+                return;
+            }
+
+            Task.Run(async () =>
+            {
+                if (delayMilliseconds > 0)
+                {
+                    await Task.Delay(delayMilliseconds).ConfigureAwait(false);
+                }
+
+                Client client;
+                lock (Gate.Clients)
+                {
+                    Gate.Clients.TryGetValue(channel_name, out client);
+                }
+
+                if (client != null)
+                {
+                    client.Connect();
+                }
+                else
+                {
+                    Events.LogChannelEvent(channel_name, "Reconnect skipped: client is no longer registered");
+                }
+            });
+        }
+
         void enquire_link_timer_Elapsed(object sender, ElapsedEventArgs e)
         {
             if (!Gate.Servers.ContainsKey(channel_name) &&
@@ -276,12 +337,9 @@ namespace Smpp
             {
                 Events.LogChannelEvent(channel_name, "Connection is broken");
 
-                Task.Run(() =>
-                {
-                    enquire_link_timer.Stop();
-                    timeout_timer.Stop();
-                    Gate.Clients[channel_name].Connect();
-                });
+                enquire_link_timer.Stop();
+                timeout_timer.Stop();
+                ScheduleReconnect(0);
 
                 return;
             }
@@ -395,9 +453,7 @@ namespace Smpp
 
                         if (!is_server)
                         {
-                            // try to reconnect
-                            Thread.Sleep(reconnectDelay);
-                            Task.Run(() => { Gate.Clients[channel_name].Connect(); });
+                            ScheduleReconnect();
                         }
                         else
                         {
@@ -453,7 +509,7 @@ namespace Smpp
 
                 if (!is_server)
                 {
-                    Task.Run(() => { Gate.Clients[channel_name].Connect(); });
+                    ScheduleReconnect();
                 }
                 else
                 {
@@ -537,9 +593,7 @@ namespace Smpp
                         Events.LogChannelEvent(channel_name, "Error: " + Common.command_status[bind_transceiver.command_status].description);
                         if (!is_server)
                         {
-                            // try to reconnect
-                            Thread.Sleep(reconnectDelay);
-                            Task.Run(() => { Gate.Clients[channel_name].Connect(); });
+                            ScheduleReconnect();
                         }
                     }
                     break;
@@ -552,8 +606,7 @@ namespace Smpp
 
                         if (!is_server)
                         {
-                            Thread.Sleep(reconnectDelay);
-                            Task.Run(() => { Gate.Clients[channel_name].Connect(); });
+                            ScheduleReconnect();
                         }
                     }
 
@@ -568,8 +621,7 @@ namespace Smpp
 
                         if (!is_server)
                         {
-                            Thread.Sleep(reconnectDelay);
-                            Task.Run(() => { Gate.Clients[channel_name].Connect(); });
+                            ScheduleReconnect();
                         }
                     }
 
@@ -975,16 +1027,17 @@ namespace Smpp
                     tcp_stream.Close();
                     tcp_client.Close();
 
-                    Gate.Clients.Remove(channel_name);
-                    Gate.Servers.Remove(channel_name);
+                    if (is_server)
+                    {
+                        Gate.Servers.Remove(channel_name);
+                    }
 
                     Events.LogChannelEvent(channel_name, "Disconnected");
 
                     // should reconnect if it was a client
                     if (!is_server)
                     {
-                        Thread.Sleep(10000);
-                        Task.Run(() => { Gate.Clients[channel_name].Connect(); });
+                        ScheduleReconnect();
                     }
                     break;
                 case "unbind_resp":

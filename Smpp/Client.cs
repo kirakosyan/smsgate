@@ -50,9 +50,7 @@ namespace Smpp
             {
                 Events.LogChannelEvent(channel_name, "Unable to connect to host: " + host + ":" + port);
 
-                // Try to reconnect in 10 sec
-                Thread.Sleep(10000);
-                Task.Run(() => { Connect(); });
+                ScheduleReconnect();
 
                 return false;
             }
