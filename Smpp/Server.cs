@@ -92,17 +92,6 @@ namespace Smpp
             sm.message_id = message_id;
             sm.submitted_time = DateTime.Now;
             sm.registered_delivery = delivery_report;
-            try
-            {
-                submitted_messages.Add(data_sm.sequence_number, sm);
-            }
-            catch (ArgumentException)
-            {
-                Events.LogChannelEvent(channel_name, "Duplicate sequence number.");
-                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
-                return 3;
-            }
-
             data_sm.Sender = sender;
             data_sm.Recipient = recipient;
             data_sm.Body = body;
@@ -126,6 +115,13 @@ namespace Smpp
             }
 
             var pdu = data_sm.EncodeM();
+
+            if (!TryTrackSubmittedMessages(data_sm.sequence_number, pdu.Length, sm))
+            {
+                Events.LogChannelEvent(channel_name, "Duplicate sequence number.");
+                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
+                return 3;
+            }
 
             Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient);
 
@@ -152,7 +148,7 @@ namespace Smpp
                 }
             }
 
-            return 0;
+            return retVal;
         }
 
         private int DeliverSm(int message_id, string sender, string recipient, string body, string body_format, bool delivery_report)
@@ -196,17 +192,6 @@ namespace Smpp
             sm.message_id = message_id;
             sm.submitted_time = DateTime.Now;
             sm.registered_delivery = delivery_report;
-            try
-            {
-                submitted_messages.Add(deliver_sm.sequence_number, sm);
-            }
-            catch (ArgumentException)
-            {
-                Events.LogChannelEvent(channel_name, "Duplicate sequence number.");
-                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
-                return 3;
-            }
-
             deliver_sm.Sender = sender;
             deliver_sm.Recipient = recipient;
             deliver_sm.Body = body;
@@ -233,6 +218,13 @@ namespace Smpp
             }
 
             string[] pdu = deliver_sm.EncodeM();
+
+            if (!TryTrackSubmittedMessages(deliver_sm.sequence_number, pdu.Length, sm))
+            {
+                Events.LogChannelEvent(channel_name, "Duplicate sequence number.");
+                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
+                return 3;
+            }
 
             Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient);
 
@@ -327,37 +319,46 @@ namespace Smpp
                 {
                     NetworkStream ns;
                     ns = tcp_client.GetStream();
-                    byte[] buffer = new byte[Common.MAX_RECEIVE_LENGTH];
                     byte[] ByteLength = new byte[4];
                     byte[] BytePDU;
                     int PDULength;
                     string pdu;
                     string systemId;
                     string response = "";
-                    int l = 0;
 
                     string ip = ((IPEndPoint)tcp_client.Client.RemoteEndPoint).Address.ToString();
                     int authCode = 0;
+                    Server esme = null;
 
-                    ns.Read(buffer, 0, buffer.Length);
-                    ByteLength[0] = buffer[0]; ByteLength[1] = buffer[1];
-                    ByteLength[2] = buffer[2]; ByteLength[3] = buffer[3];
+                    tcp_client.ReceiveTimeout = 10000;
+                    ns.ReadTimeout = 10000;
+
+                    if (!ReadExact(ns, ByteLength, 0, ByteLength.Length))
+                    {
+                        ns.Close();
+                        tcp_client.Close();
+                        return;
+                    }
+
                     PDULength = int.Parse(Common.ConvertByteArrayToHexString(ByteLength), System.Globalization.NumberStyles.HexNumber);
 
-                    BytePDU = new byte[PDULength];
-                    for (int k = 0; k < PDULength; k++)
+                    if (PDULength < 16 || PDULength > Common.MAX_PDU_LENGTH)
                     {
-                        try
-                        {
-                            BytePDU[k] = buffer[l++];
-                        }
-                        catch
-                        {
-                            ns.Close();
-                            tcp_client.Close();
-                            throw new CommandLengthException(String.Empty);
-                        }
+                        ns.Close();
+                        tcp_client.Close();
+                        return;
                     }
+
+                    BytePDU = new byte[PDULength];
+                    Buffer.BlockCopy(ByteLength, 0, BytePDU, 0, ByteLength.Length);
+
+                    if (!ReadExact(ns, BytePDU, ByteLength.Length, PDULength - ByteLength.Length))
+                    {
+                        ns.Close();
+                        tcp_client.Close();
+                        return;
+                    }
+
                     pdu = Common.ConvertByteArrayToHexString(BytePDU);
 
                     switch (Common.command_id.Values[Common.command_id.IndexOfKey(uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber))])
@@ -366,7 +367,7 @@ namespace Smpp
                             var bind_receiver = new BindReceiver(pdu);
                             var bind_receiver_resp = new BindReceiverResp();
 
-                            authCode = Authenticate(bind_receiver.SystemID, bind_receiver.Password, ip);
+                            authCode = Authenticate(bind_receiver.SystemID, bind_receiver.Password, ip, out esme);
                             systemId = bind_receiver.SystemID;
                             bind_receiver_resp.SystemID = Common.SMSC_ID;
                             bind_receiver_resp.command_status = (uint)authCode;
@@ -378,7 +379,7 @@ namespace Smpp
                             var bind_transmitter = new BindTransmitter(pdu);
                             var bind_transmitter_resp = new BindTransmitterResp();
 
-                            authCode = Authenticate(bind_transmitter.SystemID, bind_transmitter.Password, ip);
+                            authCode = Authenticate(bind_transmitter.SystemID, bind_transmitter.Password, ip, out esme);
                             systemId = bind_transmitter.SystemID;
                             bind_transmitter_resp.SystemID = Common.SMSC_ID;
                             bind_transmitter_resp.command_status = (uint)authCode;
@@ -390,7 +391,7 @@ namespace Smpp
                             var bind_transceiver = new BindTransceiver(pdu);
                             var bind_transceiver_resp = new BindTransceiverResp();
 
-                            authCode = Authenticate(bind_transceiver.SystemID, bind_transceiver.Password, ip);
+                            authCode = Authenticate(bind_transceiver.SystemID, bind_transceiver.Password, ip, out esme);
                             systemId = bind_transceiver.SystemID;
                             bind_transceiver_resp.SystemID = Common.SMSC_ID;
                             bind_transceiver_resp.command_status = (uint)authCode;
@@ -418,7 +419,6 @@ namespace Smpp
                         return;
                     }
 
-                    Server esme = Gate.Servers.Values.FirstOrDefault(server => server.system_id == systemId);
                     esme.Events.LogChannelEvent(esme.channel_name, "Received [" + Common.command_id.Values[Common.command_id.IndexOfKey(uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber))] + "]");
 
                     esme.Events.LogChannelEvent(esme.channel_name, "Logged in successfully IP: " + ip);
@@ -434,15 +434,43 @@ namespace Smpp
             }
             catch (Exception)
             {
+                try
+                {
+                    tcp_client.Close();
+                }
+                catch
+                {
+                    ;
+                }
+
                 return;
             }
         }
 
-        private static int Authenticate(string login, string password, string ip)
+        private static bool ReadExact(NetworkStream stream, byte[] buffer, int offset, int count)
+        {
+            while (count > 0)
+            {
+                int bytesRead = stream.Read(buffer, offset, count);
+                if (bytesRead == 0)
+                {
+                    return false;
+                }
+
+                offset += bytesRead;
+                count -= bytesRead;
+            }
+
+            return true;
+        }
+
+        private static int Authenticate(string login, string password, string ip, out Server authenticatedServer)
         {
             int authCode = ESME_RBINDFAIL;
+            authenticatedServer = null;
 
-            if (Gate.Servers.Values.Any(server => server.system_id == login && server.password == password))
+            authenticatedServer = Gate.Servers.Values.FirstOrDefault(server => server.system_id == login && server.password == password);
+            if (authenticatedServer != null)
             {
                 authCode = 0; // ESME_ROK
             }

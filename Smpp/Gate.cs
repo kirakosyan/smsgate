@@ -66,6 +66,14 @@ namespace Smpp
         /// <returns>Server connection instance</returns>
         public Server AddServerConnection(string channelName, string systemId, string password)
         {
+            foreach (var registeredServer in Servers.Values)
+            {
+                if (registeredServer.system_id == systemId)
+                {
+                    throw new System.ArgumentException("Server connection with the same system ID already registered");
+                }
+            }
+
             var server = new Server(channelName, Events);
             server.is_server = true;
             server.system_id = systemId;

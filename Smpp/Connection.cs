@@ -41,6 +41,7 @@ namespace Smpp
         /// </summary>
         byte[] _buffer;
         string _partial_pdu = "";
+        readonly object _receive_lock = new object();
 
         /// <summary>
         /// if stream connected and binded
@@ -369,21 +370,23 @@ namespace Smpp
 
         protected void receiveCallback(IAsyncResult ar)
         {
-            var myCompleteMessage = new StringBuilder();
-            int numberOfBytesRead;
+            int numberOfBytesRead = 0;
+            bool continueReceiving = false;
 
             if (tcp_stream != null && tcp_stream.CanRead)
             {
                 try
                 {
                     numberOfBytesRead = tcp_stream.EndRead(ar);
-                    myCompleteMessage.Append(_partial_pdu);
-                    _partial_pdu = "";
-                    myCompleteMessage.Append(Common.ConvertByteArrayToHexString(_buffer, numberOfBytesRead));
 
                     if (numberOfBytesRead > 0)
                     {
-                        new Thread(new ParameterizedThreadStart(this.MessageHandler)).Start(myCompleteMessage.ToString());
+                        MessageHandler(Common.ConvertByteArrayToHexString(_buffer, numberOfBytesRead));
+                        continueReceiving = true;
+                    }
+                    else
+                    {
+                        connected = false;
                     }
                 }
                 catch
@@ -392,7 +395,10 @@ namespace Smpp
                 }
                 finally
                 {
-                    Receive();
+                    if (continueReceiving)
+                    {
+                        Receive();
+                    }
                 }
             }
         }
@@ -527,32 +533,40 @@ namespace Smpp
             int PDULength = 0;
             last_pdu_time = DateTime.Now;
 
-            try
+            lock (_receive_lock)
             {
-                _partial_pdu += mess.ToString();
-                PDULength = int.Parse(_partial_pdu.Substring(0, 8), System.Globalization.NumberStyles.HexNumber);
-                if (PDULength > 1500)
+                try
                 {
+                    _partial_pdu += mess.ToString();
+
+                    while (_partial_pdu.Length >= 8)
+                    {
+                        PDULength = int.Parse(_partial_pdu.Substring(0, 8), System.Globalization.NumberStyles.HexNumber);
+                        if (PDULength < 16 || PDULength > Common.MAX_PDU_LENGTH)
+                        {
+                            _partial_pdu = "";
+                            return;
+                        }
+
+                        if (_partial_pdu.Length < PDULength * 2)
+                        {
+                            return;
+                        }
+
+                        data.Add(_partial_pdu.Substring(0, PDULength * 2));
+                        _partial_pdu = _partial_pdu.Substring(PDULength * 2);
+                    }
+                }
+                catch (CommandLengthException)
+                {
+                    Events.LogEvent(LogEvent.Level.Error, "Command length exception");
+                }
+                catch (Exception e1)
+                {
+                    Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1 + ":" + PDULength);
                     _partial_pdu = "";
                     return;
                 }
-                while (PDULength != 0)
-                {
-                    data.Add(_partial_pdu.Substring(0, PDULength * 2));
-                    _partial_pdu = _partial_pdu.Substring(PDULength * 2);
-
-                    PDULength = _partial_pdu != "" ? int.Parse(_partial_pdu.Substring(0, 8), System.Globalization.NumberStyles.HexNumber) : 0;
-                }
-            }
-            catch (CommandLengthException)
-            {
-                Events.LogEvent(LogEvent.Level.Error, "Command length exception");
-            }
-            catch (Exception e1)
-            {
-                Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1 + ":" + PDULength);
-                _partial_pdu = "";
-                return;
             }
 
             foreach (string pdu in data)
@@ -1206,6 +1220,27 @@ namespace Smpp
             }
         }
 
+        protected bool TryTrackSubmittedMessages(uint firstSequenceNumber, int partCount, submitted_message message)
+        {
+            lock (submitted_messages)
+            {
+                for (var part = 0; part < partCount; part++)
+                {
+                    if (submitted_messages.ContainsKey(firstSequenceNumber + (uint)part))
+                    {
+                        return false;
+                    }
+                }
+
+                for (var part = 0; part < partCount; part++)
+                {
+                    submitted_messages.Add(firstSequenceNumber + (uint)part, message);
+                }
+            }
+
+            return true;
+        }
+
         /// <summary>
         /// Sends message
         /// </summary>
@@ -1261,17 +1296,6 @@ namespace Smpp
             sm.message_id = message_id;
             sm.submitted_time = DateTime.Now;
             sm.registered_delivery = delivery_report;
-            try
-            {
-                submitted_messages.Add(submit_sm.sequence_number, sm);
-            }
-            catch (ArgumentException)
-            {
-                Events.LogChannelEvent(channel_name, "Duplicate sequence number.");
-                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
-                return 3;
-            }
-
             submit_sm.Sender = sender;
             submit_sm.Recipient = recipient;
             submit_sm.Body = body;
@@ -1298,6 +1322,13 @@ namespace Smpp
             }
             submit_sm.MultipartSequenceNumber = multipart_sequence_number;
             string[] pdu = submit_sm.EncodeM();
+
+            if (!TryTrackSubmittedMessages(submit_sm.sequence_number, pdu.Length, sm))
+            {
+                Events.LogChannelEvent(channel_name, "Duplicate sequence number.");
+                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
+                return 3;
+            }
 
             Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient);
 

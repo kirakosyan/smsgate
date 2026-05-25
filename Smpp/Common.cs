@@ -495,6 +495,11 @@ namespace Smpp
         /// </summary>
         public const int MAX_RECEIVE_LENGTH = 1048576; //1Mb
 
+        /// <summary>
+        /// Maximum SMPP PDU length accepted by this implementation.
+        /// </summary>
+        internal const int MAX_PDU_LENGTH = 1500;
+
         #endregion
 
         #region enumerators
