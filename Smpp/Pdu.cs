@@ -163,7 +163,7 @@ namespace Smpp
             var response = new StringBuilder();
             int len = 0;
 
-            response.Append(BuildHeader((Common.CommandId)command_id, 0, sequence_number));
+            response.Append(BuildHeader((Common.CommandId)command_id, command_status, sequence_number));
 
             len = response.Length / 2 + 4;
 

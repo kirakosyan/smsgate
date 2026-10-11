@@ -154,6 +154,7 @@ namespace Smpp.Tests
                 var client = gate.AddClientConnection("client", "127.0.0.1", port, "system", "password");
                 Assert.That(client.Connect(), Is.True);
                 Assert.That(bindReceived.Wait(3000), Is.True);
+                Assert.That(SpinWait.SpinUntil(() => client.connected, 3000), Is.True);
 
                 client.large_message = 1;
                 client.SubmitSm(42, "1000", "2000", new string('a', 170));
@@ -197,6 +198,9 @@ namespace Smpp.Tests
                         bindReceived.Set();
 
                         ReadPdu(stream);
+                        ReadPdu(stream);
+                        // Keep the transport alive until the caller finishes inspecting pending ACKs.
+                        // Quit sends the third PDU (unbind); do not race EOF against the assertion.
                         ReadPdu(stream);
                     }
                 }
