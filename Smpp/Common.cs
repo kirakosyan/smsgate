@@ -453,6 +453,10 @@ namespace Smpp
         {
             public DateTime submitted_dt;
             public int reference;
+            public string sender;
+            public string recipient;
+            public string body_format;
+            public CommandId command;
             public int part_num;
             public int num_of_parts;
             public string short_message;
@@ -498,7 +502,9 @@ namespace Smpp
         /// <summary>
         /// Maximum SMPP PDU length accepted by this implementation.
         /// </summary>
-        internal const int MAX_PDU_LENGTH = 1500;
+        // Allow a full ushort-sized message_payload TLV plus mandatory fields.
+        internal const int MAX_PDU_LENGTH = ushort.MaxValue + 1024;
+        internal const int MAX_BIND_PDU_LENGTH = 1500;
 
         #endregion
 

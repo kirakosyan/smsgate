@@ -28,11 +28,6 @@ namespace Smpp
         /// </summary>
         public Gate(GateEvents events)
         {
-            //Common.InitCommandID();
-            //Common.InitCommandStatus();
-            //Common.InitTLV();
-            //Common.InitBodyFormat();
-
             Events = events;
         }
 
@@ -47,14 +42,17 @@ namespace Smpp
         /// <returns>Client connection instance</returns>
         public Client AddClientConnection(string channelName, string host, int port, string systemId, string password)
         {
-            var client = new Client(channelName, Events);
-            client.is_server = false;
-            client.host = host;
-            client.port = port;
-            client.system_id = systemId;
-            client.password = password;
+            lock (Clients)
+            {
+                var client = new Client(channelName, Events);
+                client.is_server = false;
+                client.host = host;
+                client.port = port;
+                client.system_id = systemId;
+                client.password = password;
 
-            return client;
+                return client;
+            }
         }
 
         /// <summary>
@@ -66,20 +64,23 @@ namespace Smpp
         /// <returns>Server connection instance</returns>
         public Server AddServerConnection(string channelName, string systemId, string password)
         {
-            foreach (var registeredServer in Servers.Values)
+            lock (Servers)
             {
-                if (registeredServer.system_id == systemId)
+                foreach (var registeredServer in Servers.Values)
                 {
-                    throw new System.ArgumentException("Server connection with the same system ID already registered");
+                    if (registeredServer.system_id == systemId)
+                    {
+                        throw new System.ArgumentException("Server connection with the same system ID already registered");
+                    }
                 }
+
+                var server = new Server(channelName, Events);
+                server.is_server = true;
+                server.system_id = systemId;
+                server.password = password;
+
+                return server;
             }
-
-            var server = new Server(channelName, Events);
-            server.is_server = true;
-            server.system_id = systemId;
-            server.password = password;
-
-            return server;
         }
     }
 }

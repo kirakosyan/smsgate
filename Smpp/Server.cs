@@ -5,7 +5,6 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using Smpp.Events;
-using Smpp.Exceptions;
 using Smpp.Requests;
 using Smpp.Responses;
 
@@ -13,510 +12,226 @@ namespace Smpp
 {
     public class Server : Connection
     {
-        private const int ESME_RBINDFAIL = 13;
-
+        private static readonly object ListenerLock = new object();
         private static TcpListener tcp_server;
-        public static Boolean running = false;
+        private static CancellationTokenSource listenerCancellation;
+        public static volatile bool running;
 
-        public Server(string channelName, GateEvents events)
-            : base(channelName, events)
+        public Server(string channelName, GateEvents events) : base(channelName, events)
         {
-            if (Gate.Servers.ContainsKey(channelName))
+            is_server = true;
+            lock (Gate.Servers)
             {
-                throw new ArgumentException("Channel with the same name already registered");
+                if (Gate.Servers.ContainsKey(channelName))
+                    throw new ArgumentException("Channel with the same name already registered");
+                Gate.Servers.Add(channelName, this);
             }
-
-            Gate.Servers.Add(channelName, this);
         }
 
-        /// <summary>
-        /// Sends message
-        /// </summary>
-        /// <param name="message_id">Unique message id</param>
-        /// <param name="sender">Sender</param>
-        /// <param name="recipient">Recipient</param>
-        /// <param name="body">body</param>
-        /// <param name="body_format">Body format. unicode,ascii,wap_push</param>
-        /// <param name="delivery_report">Request delivery report</param>
-        /// <returns>0 if successful, 
-        /// 1 - No active connection, 
-        /// 2 - Too many messages per second
-        /// 3 - Duplicate sequence number </returns>
-        public override int SubmitSm(int message_id, string sender, string recipient, string body, string body_format = "ascii", bool delivery_report = true)
+        public override int SubmitSm(int message_id, string sender, string recipient, string body,
+            string body_format = "ascii", bool delivery_report = true)
         {
-            if (!use_deliver_sm)
-            {
-                return DataSm(message_id, sender, recipient, body, body_format, delivery_report);
-            }
-            return DeliverSm(message_id, sender, recipient, body, body_format, delivery_report);
+            bool deliver = use_deliver_sm;
+            return SendMessage(message_id, sender, recipient, delivery_report, deliver ? "deliver_sm" : "data_sm",
+                (sequence, reference) =>
+                {
+                    if (deliver)
+                        return new DeliverSm(Events)
+                        {
+                            sequence_number = sequence, MultipartSequenceNumber = reference,
+                            Sender = sender, Recipient = recipient, Body = body, BodyFormat = body_format,
+                            ServiceType = system_type, SourceAddrTON = source_ton, SourceAddrNPI = source_npi,
+                            DestAddrTON = destination_ton, DestAddrNPI = destination_npi,
+                            RegisteredDelivery = registered_delivery == 1 && delivery_report ? 1 : 0,
+                            SplitBaseASCII = split_base_ascii, LargeMessageHandleMethod = large_message, Is8bit = use8bit
+                        }.EncodeM();
+                    return new DataSm
+                    {
+                        sequence_number = sequence, Sender = sender, Recipient = recipient, Body = body,
+                        BodyFormat = body_format, ServiceType = system_type, SourceAddrTON = source_ton,
+                        SourceAddrNPI = source_npi, DestAddrTON = destination_ton, DestAddrNPI = destination_npi,
+                        RegisteredDelivery = registered_delivery == 1 && delivery_report ? 1 : 0
+                    }.EncodeM();
+                });
         }
 
-        private int DataSm(int message_id, string sender, string recipient, string body, string body_format, bool delivery_report)
-        {
-            if (!connected)
-            {
-                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.received_route_failure);
-                return 1;
-            }
-
-            // check for max sms count
-            if (max_threads != 0)
-            {
-                int now_second = DateTime.Now.Second;
-                if (now_second != last_second)
-                {
-                    last_second = now_second;
-                    sent_during_last_second = 0;
-                }
-                else
-                {
-                    sent_during_last_second++;
-                }
-                if (max_threads < sent_during_last_second)
-                {
-                    Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
-
-                    return 2; // too many SMS per second
-                }
-            }
-
-            var data_sm = new DataSm();
-
-            while (submitted_messages.ContainsKey(sequence_number))
-            {
-                sequence_number++;
-            }
-
-            data_sm.sequence_number = sequence_number;
-            var sm = new submitted_message();
-            sm.message_id = message_id;
-            sm.submitted_time = DateTime.Now;
-            sm.registered_delivery = delivery_report;
-            data_sm.Sender = sender;
-            data_sm.Recipient = recipient;
-            data_sm.Body = body;
-            data_sm.BodyFormat = body_format;
-
-            data_sm.ServiceType = system_type;
-
-            data_sm.SourceAddrTON = source_ton;
-            data_sm.SourceAddrNPI = source_npi;
-
-            data_sm.DestAddrTON = destination_ton;
-            data_sm.DestAddrNPI = destination_npi;
-
-            if (registered_delivery == 1 && delivery_report)
-            {
-                data_sm.RegisteredDelivery = registered_delivery;
-            }
-            else
-            {
-                data_sm.RegisteredDelivery = 0;
-            }
-
-            var pdu = data_sm.EncodeM();
-
-            if (!TryTrackSubmittedMessages(data_sm.sequence_number, pdu.Length, sm))
-            {
-                Events.LogChannelEvent(channel_name, "Duplicate sequence number.");
-                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
-                return 3;
-            }
-
-            Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient);
-
-            var retVal = 0;
-            var k = pdu.Length;
-            foreach (string part in pdu)
-            {
-                Events.LogChannelEvent(channel_name, "Sending [data_sm]", debug ? part : "");
-
-                retVal += SendPDU(part);
-                if (k != 1)
-                {
-                    Thread.Sleep(multypart_delay);
-                }
-                k--;
-
-                if (registered_delivery == 1 && delivery_report)
-                {
-                    Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.submitted_waiting_for_ACK);
-                }
-                else
-                {
-                    Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.received_routed);
-                }
-            }
-
-            return retVal;
-        }
-
-        private int DeliverSm(int message_id, string sender, string recipient, string body, string body_format, bool delivery_report)
-        {
-            if (!connected)
-            {
-                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.received_route_failure);
-                return 1;
-            }
-
-            // check for max sms count
-            if (max_threads != 0)
-            {
-                int now_second = DateTime.Now.Second;
-                if (now_second != last_second)
-                {
-                    last_second = now_second;
-                    sent_during_last_second = 0;
-                }
-                else
-                {
-                    sent_during_last_second++;
-                }
-                if (max_threads < sent_during_last_second)
-                {
-                    Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
-
-                    return 2; // too many SMS per second
-                }
-            }
-
-            var deliver_sm = new DeliverSm(Events);
-
-            while (submitted_messages.ContainsKey(sequence_number))
-            {
-                sequence_number++;
-            }
-
-            deliver_sm.sequence_number = sequence_number;
-            submitted_message sm = new submitted_message();
-            sm.message_id = message_id;
-            sm.submitted_time = DateTime.Now;
-            sm.registered_delivery = delivery_report;
-            deliver_sm.Sender = sender;
-            deliver_sm.Recipient = recipient;
-            deliver_sm.Body = body;
-            deliver_sm.BodyFormat = body_format;
-
-            deliver_sm.ServiceType = system_type;
-
-            deliver_sm.SourceAddrTON = source_ton;
-            deliver_sm.SourceAddrNPI = source_npi;
-
-            deliver_sm.DestAddrTON = destination_ton;
-            deliver_sm.DestAddrNPI = destination_npi;
-
-            deliver_sm.SplitBaseASCII = split_base_ascii;
-            deliver_sm.LargeMessageHandleMethod = large_message;
-
-            if (registered_delivery == 1 && delivery_report)
-            {
-                deliver_sm.RegisteredDelivery = registered_delivery;
-            }
-            else
-            {
-                deliver_sm.RegisteredDelivery = 0;
-            }
-
-            string[] pdu = deliver_sm.EncodeM();
-
-            if (!TryTrackSubmittedMessages(deliver_sm.sequence_number, pdu.Length, sm))
-            {
-                Events.LogChannelEvent(channel_name, "Duplicate sequence number.");
-                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
-                return 3;
-            }
-
-            Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient);
-
-            int k = pdu.Length;
-            foreach (string part in pdu)
-            {
-                Events.LogChannelEvent(channel_name, "Sending [deliver_sm]", debug ? part : "");
-
-                SendPDU(part);
-                if (k != 1)
-                {
-                    Thread.Sleep(multypart_delay);
-                }
-                k--;
-
-                if (registered_delivery == 1 && delivery_report)
-                {
-                    Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.submitted_waiting_for_ACK);
-                }
-                else
-                {
-                    Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.received_routed);
-                }
-            }
-
-            return 0;
-        }
-
-        /// <summary>
-        /// Starts Server instance, should run only once.
-        /// </summary>
-        /// <param name="ip">IP address to listen on</param>
-        /// <param name="port">Port number, default 2775</param>
-        /// <returns>True if server was successfully started</returns>
+        /// <summary>Starts the listener before returning, then accepts sessions in the background.</summary>
         public static void StartAsync(string ip, int port)
         {
-            Task.Run(() => { Start(ip, port); });
+            if (!IPAddress.TryParse(ip, out var address))
+                throw new ArgumentException("Check IP address", nameof(ip));
+            lock (ListenerLock)
+            {
+                if (running)
+                    throw new InvalidOperationException("The SMPP listener is already running.");
+                var listener = new TcpListener(address, port);
+                listener.Start();
+                tcp_server = listener;
+                running = true;
+                listenerCancellation = new CancellationTokenSource();
+                _ = AcceptConnections(listener, listenerCancellation.Token);
+            }
         }
 
-        /// <summary>
-        /// Starts Server instance, should run only once.
-        /// </summary>
-        /// <param name="ip">IP address to listen on</param>
-        /// <param name="port">Port number, default 2775</param>
-        /// <returns>True if server was successfully started</returns>
-        private static bool Start(string ip, int port)
+        private static Task AcceptConnections(TcpListener listener, CancellationToken cancellation) =>
+            RunAcceptLoop(listener.AcceptTcpClientAsync,
+                client => { _ = CreateConnection(listener, client, cancellation); },
+                ex =>
+                {
+                    Server[] servers;
+                    lock (Gate.Servers)
+                        servers = Gate.Servers.Values.ToArray();
+                    foreach (var server in servers)
+                        server.Notify(() => server.Events.LogChannelEvent(server.channel_name, "Accept failed; retrying: " + ex.Message));
+                }, cancellation);
+
+        internal static async Task RunAcceptLoop(Func<CancellationToken, ValueTask<TcpClient>> accept,
+            Action<TcpClient> accepted, Action<SocketException> failed, CancellationToken cancellation)
         {
-            IPAddress ip_address;
-
-            if (!IPAddress.TryParse(ip, out ip_address))
-            {
-                throw new ArgumentException("Check IP address");
-            }
-
-            tcp_server = new TcpListener(ip_address, port);
-
-            tcp_server.Start();
-            running = true;
-
-            while (running)
+            while (!cancellation.IsCancellationRequested)
             {
                 try
                 {
-                    if (running && tcp_server.Pending())
+                    var client = await accept(cancellation).ConfigureAwait(false);
+                    if (cancellation.IsCancellationRequested)
                     {
-                        new Thread(CreateConnection).Start();
+                        client.Dispose();
+                        return;
                     }
-                    Thread.Sleep(500);
+                    accepted(client);
                 }
-                catch
+                catch (SocketException ex)
                 {
-                    break;
+                    if (cancellation.IsCancellationRequested)
+                        return;
+                    failed(ex);
+                    // Resource exhaustion must not turn retries into a busy loop.
+                    try { await Task.Delay(100, cancellation).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { return; }
                 }
+                catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return; }
+                catch (ObjectDisposedException) { return; }
             }
-
-            return true;
         }
 
-        /// <summary>
-        /// Handles incoming request
-        /// </summary>
-        private static void CreateConnection()
+        internal static async Task CreateConnection(TcpListener listener, TcpClient client,
+            CancellationToken cancellation, int bindTimeoutMilliseconds = 10000)
         {
-            TcpClient tcp_client;
-
-            try { tcp_client = tcp_server.AcceptTcpClient(); }
-            catch { return; }
-
+            bool accepted = false;
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            deadline.CancelAfter(bindTimeoutMilliseconds);
             try
             {
-                if (tcp_client != null && tcp_client.Connected)
+                var stream = client.GetStream();
+                stream.WriteTimeout = 10000;
+                var header = new byte[4];
+                await stream.ReadExactlyAsync(header, deadline.Token).ConfigureAwait(false);
+                uint length = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(header);
+                if (length < 16 || length > Common.MAX_BIND_PDU_LENGTH)
+                    return;
+                var bytes = new byte[length];
+                Buffer.BlockCopy(header, 0, bytes, 0, header.Length);
+                await stream.ReadExactlyAsync(bytes.AsMemory(header.Length), deadline.Token).ConfigureAwait(false);
+                string pdu = Common.ConvertByteArrayToHexString(bytes);
+                var command = (Common.CommandId)uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber);
+                string login;
+                string password;
+                Pdu response;
+                switch (command)
                 {
-                    NetworkStream ns;
-                    ns = tcp_client.GetStream();
-                    byte[] ByteLength = new byte[4];
-                    byte[] BytePDU;
-                    int PDULength;
-                    string pdu;
-                    string systemId;
-                    string response = "";
-
-                    string ip = ((IPEndPoint)tcp_client.Client.RemoteEndPoint).Address.ToString();
-                    int authCode = 0;
-                    Server esme = null;
-
-                    tcp_client.ReceiveTimeout = 10000;
-                    ns.ReadTimeout = 10000;
-
-                    if (!ReadExact(ns, ByteLength, 0, ByteLength.Length))
-                    {
-                        ns.Close();
-                        tcp_client.Close();
+                    case Common.CommandId.bind_receiver:
+                        var receiver = new BindReceiver(pdu);
+                        login = receiver.SystemID;
+                        password = receiver.Password;
+                        response = new BindReceiverResp { sequence_number = receiver.sequence_number };
+                        break;
+                    case Common.CommandId.bind_transmitter:
+                        var transmitter = new BindTransmitter(pdu);
+                        login = transmitter.SystemID;
+                        password = transmitter.Password;
+                        response = new BindTransmitterResp { sequence_number = transmitter.sequence_number };
+                        break;
+                    case Common.CommandId.bind_transceiver:
+                        var transceiver = new BindTransceiver(pdu);
+                        login = transceiver.SystemID;
+                        password = transceiver.Password;
+                        response = new BindTransceiverResp { sequence_number = transceiver.sequence_number };
+                        break;
+                    default:
                         return;
-                    }
-
-                    PDULength = int.Parse(Common.ConvertByteArrayToHexString(ByteLength), System.Globalization.NumberStyles.HexNumber);
-
-                    if (PDULength < 16 || PDULength > Common.MAX_PDU_LENGTH)
-                    {
-                        ns.Close();
-                        tcp_client.Close();
-                        return;
-                    }
-
-                    BytePDU = new byte[PDULength];
-                    Buffer.BlockCopy(ByteLength, 0, BytePDU, 0, ByteLength.Length);
-
-                    if (!ReadExact(ns, BytePDU, ByteLength.Length, PDULength - ByteLength.Length))
-                    {
-                        ns.Close();
-                        tcp_client.Close();
-                        return;
-                    }
-
-                    pdu = Common.ConvertByteArrayToHexString(BytePDU);
-
-                    switch (Common.command_id.Values[Common.command_id.IndexOfKey(uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber))])
-                    {
-                        case "bind_receiver":
-                            var bind_receiver = new BindReceiver(pdu);
-                            var bind_receiver_resp = new BindReceiverResp();
-
-                            authCode = Authenticate(bind_receiver.SystemID, bind_receiver.Password, ip, out esme);
-                            systemId = bind_receiver.SystemID;
-                            bind_receiver_resp.SystemID = Common.SMSC_ID;
-                            bind_receiver_resp.command_status = (uint)authCode;
-                            bind_receiver_resp.sequence_number = bind_receiver.sequence_number;
-                            response = bind_receiver_resp.Encode();
-
-                            break;
-                        case "bind_transmitter":
-                            var bind_transmitter = new BindTransmitter(pdu);
-                            var bind_transmitter_resp = new BindTransmitterResp();
-
-                            authCode = Authenticate(bind_transmitter.SystemID, bind_transmitter.Password, ip, out esme);
-                            systemId = bind_transmitter.SystemID;
-                            bind_transmitter_resp.SystemID = Common.SMSC_ID;
-                            bind_transmitter_resp.command_status = (uint)authCode;
-                            bind_transmitter_resp.sequence_number = bind_transmitter.sequence_number;
-                            response = bind_transmitter_resp.Encode();
-
-                            break;
-                        case "bind_transceiver":
-                            var bind_transceiver = new BindTransceiver(pdu);
-                            var bind_transceiver_resp = new BindTransceiverResp();
-
-                            authCode = Authenticate(bind_transceiver.SystemID, bind_transceiver.Password, ip, out esme);
-                            systemId = bind_transceiver.SystemID;
-                            bind_transceiver_resp.SystemID = Common.SMSC_ID;
-                            bind_transceiver_resp.command_status = (uint)authCode;
-                            bind_transceiver_resp.sequence_number = bind_transceiver.sequence_number;
-                            response = bind_transceiver_resp.Encode();
-
-                            break;
-                        default:
-                            // Something unknown was received
-                            ns.Close();
-                            tcp_client.Close();
-                            return;
-                    }
-                    byte[] msg;
-                    msg = Common.ConvertHexStringToByteArray(response);
-
-                    ns.Write(msg, 0, msg.Length);
-
-                    if (authCode != 0)
-                    {
-                        // Events.LogEvent(LogEvent.Level.Error, "Received [" + Common.command_id.Values[Common.command_id.IndexOfKey(uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber))] + "]");
-                        // Events.LogEvent(LogEvent.Level.Error, "Error connecting: " + Common.command_status[(uint)authCode].description);
-                        ns.Close();
-                        tcp_client.Close();
-                        return;
-                    }
-
-                    esme.Events.LogChannelEvent(esme.channel_name, "Received [" + Common.command_id.Values[Common.command_id.IndexOfKey(uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber))] + "]");
-
-                    esme.Events.LogChannelEvent(esme.channel_name, "Logged in successfully IP: " + ip);
-
-                    esme.tcp_client = tcp_client;
-                    esme.tcp_stream = tcp_client.GetStream();
-                    esme.is_server = true;
-                    esme.connected = true;
-                    esme.enquire_link_timer.Start();
-                    esme.timeout_timer.Start();
-                    esme.Receive();
                 }
+                Server server;
+                lock (Gate.Servers)
+                    server = Gate.Servers.Values.FirstOrDefault(value => value.system_id == login && value.password == password);
+                lock (ListenerLock)
+                {
+                    if (!running || !ReferenceEquals(tcp_server, listener))
+                        return;
+                }
+                if (server == null)
+                {
+                    response.command_status = 13; // ESME_RBINDFAIL
+                    await stream.WriteAsync(Common.ConvertHexStringToByteArray(response.Encode()), deadline.Token).ConfigureAwait(false);
+                    return;
+                }
+                deadline.Token.ThrowIfCancellationRequested();
+                accepted = server.AcceptSession(client, response, command);
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is System.IO.IOException || ex is SocketException ||
+                ex is ArgumentException || ex is FormatException || ex is IndexOutOfRangeException ||
+                ex is Smpp.Exceptions.CommandLengthException || ex is ObjectDisposedException || ex is OperationCanceledException)
             {
-                try
-                {
-                    tcp_client.Close();
-                }
-                catch
-                {
-                    ;
-                }
-
-                return;
+                // Invalid or incomplete bind frames never become registered sessions.
+            }
+            finally
+            {
+                if (!accepted)
+                    client.Dispose();
             }
         }
 
-        private static bool ReadExact(NetworkStream stream, byte[] buffer, int offset, int count)
+        private bool AcceptSession(TcpClient client, Pdu response, Common.CommandId command)
         {
-            while (count > 0)
+            lock (SessionLock)
             {
-                int bytesRead = stream.Read(buffer, offset, count);
-                if (bytesRead == 0)
+                if (stopped || tcp_stream != null)
                 {
+                    response.command_status = 5; // ESME_RALYBND: do not overwrite a live session.
+                    client.GetStream().Write(Common.ConvertHexStringToByteArray(response.Encode()));
                     return false;
                 }
-
-                offset += bytesRead;
-                count -= bytesRead;
+                client.GetStream().Write(Common.ConvertHexStringToByteArray(response.Encode()));
+                BeginSession(client, true);
+                string remote = client.Client.RemoteEndPoint.ToString();
+                Notify(() => Events.LogChannelEvent(channel_name, "Received [" + command + "]"));
+                Notify(() => Events.LogChannelEvent(channel_name, "Logged in successfully IP: " + remote));
+                Receive();
+                return true;
             }
-
-            return true;
-        }
-
-        private static int Authenticate(string login, string password, string ip, out Server authenticatedServer)
-        {
-            int authCode = ESME_RBINDFAIL;
-            authenticatedServer = null;
-
-            authenticatedServer = Gate.Servers.Values.FirstOrDefault(server => server.system_id == login && server.password == password);
-            if (authenticatedServer != null)
-            {
-                authCode = 0; // ESME_ROK
-            }
-
-            // check firewall
-            // the IP is in parameter and can be checked for firewall rules here
-
-            return authCode;
         }
 
         public static bool Stop()
         {
-            running = false;
-
+            lock (ListenerLock)
+            {
+                running = false;
+                listenerCancellation?.Cancel();
+                listenerCancellation?.Dispose();
+                listenerCancellation = null;
+                tcp_server?.Stop();
+                tcp_server = null;
+            }
             KillAll();
-
-            try
-            {
-                tcp_server.Stop();
-            }
-            catch
-            {
-                return false;
-            }
-
             return true;
         }
 
-
-        /// <summary>
-        /// Closes all connection
-        /// </summary>
         public static void KillAll()
         {
-            var connections = Gate.Servers.Keys.ToList();
-
-            foreach (string c in connections)
-            {
-                try
-                {
-                    Gate.Servers[c].Quit();
-                }
-                catch
-                {; }
-            }
-            connections.Clear();
+            Server[] servers;
+            lock (Gate.Servers)
+                servers = Gate.Servers.Values.ToArray();
+            foreach (var server in servers)
+                server.Quit();
         }
     }
 }

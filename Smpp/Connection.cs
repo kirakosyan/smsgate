@@ -1,11 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
-using System.Text;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Timers;
-using Smpp.Exceptions;
 using Smpp.Events;
 using Smpp.Requests;
 using Smpp.Responses;
@@ -29,25 +28,29 @@ namespace Smpp
             public int message_id;
             public DateTime submitted_time;
             public bool registered_delivery;
+            internal Submission submission;
+        }
+
+        internal sealed class Submission
+        {
+            internal int Remaining;
+            internal uint FirstSequence;
+            internal string ResponseId = "";
+            internal bool Completed;
         }
 
         protected TcpClient tcp_client;
         protected NetworkStream tcp_stream;
-        protected AsyncCallback _callbackSend;
-        protected AsyncCallback _callbackReceive;
 
         /// <summary>
-        /// buffer which receives incoming PDU
+        /// Incomplete frame retained between socket reads.
         /// </summary>
-        byte[] _buffer;
         string _partial_pdu = "";
-        readonly object _receive_lock = new object();
 
         /// <summary>
-        /// if stream connected and binded
-        /// if not connected try to connect and bind
+        /// True only after a successful bind, until the session ends.
         /// </summary>
-        public bool connected;
+        public volatile bool connected;
 
         /// <summary>
         /// Indicates that channel is server and should listen for connections
@@ -196,6 +199,7 @@ namespace Smpp
             get { return _keep_alive; }
             set
             {
+                ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
                 _keep_alive = value;
                 if (enquire_link_timer != null)
                 {
@@ -212,6 +216,7 @@ namespace Smpp
             get { return _timeout; }
             set
             {
+                ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
                 _timeout = value;
                 if (timeout_timer != null)
                 {
@@ -246,14 +251,6 @@ namespace Smpp
         /// </summary>
         protected int max_threads = 0;
 
-        /// <summary>
-        /// The time of last pdu received
-        /// will be compared with last enquire_link time 
-        /// so if client will be overloaded and enquire_link will be
-        /// delayed, the connection will not be dropped
-        /// </summary>
-        DateTime last_pdu_time;
-
         protected int sent_during_last_second;
         protected int last_second;
 
@@ -267,11 +264,7 @@ namespace Smpp
         protected Connection(string channelName, GateEvents events)
         {
             channel_name = channelName;
-            Events = events;
-
-            _callbackSend = new AsyncCallback(sendCallback);
-            _callbackReceive = new AsyncCallback(receiveCallback);
-
+            Events = events ?? throw new ArgumentNullException(nameof(events));
             sequence_number = 1;
             connected = false;
 
@@ -292,1069 +285,747 @@ namespace Smpp
             multipart_messages = new List<Common.MultipartMessage>();
 
             multipart_sequence_number = 1;
-            last_pdu_time = DateTime.Now.AddHours(-1);
         }
 
-        protected void ScheduleReconnect()
+
+        protected readonly object SessionLock = new object();
+        protected bool stopped;
+        private CancellationTokenSource reconnectCancellation;
+        private uint? pendingBindSequence;
+        private uint pendingBindResponse;
+        private int sessionGeneration;
+        private static readonly TimeSpan MultipartLifetime = TimeSpan.FromMinutes(5);
+        private NetworkStream receivingStream;
+        private bool invalidFraming;
+        private readonly Queue<Action> notifications = new Queue<Action>();
+        private bool dispatchingNotifications;
+
+        // Serialize application notifications independently of protocol processing. No callback
+        // executes under SessionLock, and a slow subscriber cannot stall reads or keepalives.
+        protected void Notify(Action notification)
         {
-            ScheduleReconnect(reconnectDelay);
+            lock (SessionLock)
+            {
+                notifications.Enqueue(notification);
+                if (dispatchingNotifications)
+                    return;
+                dispatchingNotifications = true;
+                _ = Task.Run(DispatchNotifications);
+            }
         }
+
+        private void DispatchNotifications()
+        {
+            while (true)
+            {
+                Action notification;
+                lock (SessionLock)
+                {
+                    if (notifications.Count == 0)
+                    {
+                        dispatchingNotifications = false;
+                        return;
+                    }
+                    notification = notifications.Dequeue();
+                }
+                try { notification(); }
+                catch (Exception ex)
+                {
+                    try { Events.LogEvent(LogEvent.Level.Error, channel_name + " - Application callback failed: " + ex.Message); }
+                    catch (Exception) { } // A failing error subscriber must not stop dispatch.
+                }
+            }
+        }
+
+        internal Task DrainNotificationsAsync()
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Notify(() => completion.SetResult());
+            return completion.Task;
+        }
+
+        protected void ScheduleReconnect() => ScheduleReconnect(reconnectDelay);
 
         protected virtual void ScheduleReconnect(int delayMilliseconds)
         {
-            if (is_server)
+            lock (SessionLock)
             {
-                return;
+                if (is_server || stopped || reconnectCancellation != null)
+                    return;
+                var cancellation = new CancellationTokenSource();
+                reconnectCancellation = cancellation;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(Math.Max(0, delayMilliseconds), cancellation.Token).ConfigureAwait(false);
+                        Client client;
+                        lock (SessionLock)
+                        {
+                            if (stopped || cancellation.IsCancellationRequested ||
+                                !ReferenceEquals(reconnectCancellation, cancellation))
+                                return;
+                            reconnectCancellation = null;
+                            lock (Gate.Clients)
+                                Gate.Clients.TryGetValue(channel_name, out client);
+                        }
+                        if (ReferenceEquals(client, this))
+                            await client.ConnectAsync().ConfigureAwait(false);
+                        else
+                            Notify(() => Events.LogChannelEvent(channel_name, "Reconnect skipped: client is no longer registered"));
+                    }
+                    catch (OperationCanceledException) { }
+                    finally
+                    {
+                        cancellation.Dispose();
+                    }
+                });
             }
+        }
 
-            Task.Run(async () =>
+        protected void CancelReconnect()
+        {
+            reconnectCancellation?.Cancel();
+            reconnectCancellation = null;
+        }
+
+        protected uint NextSequenceNumber()
+        {
+            uint value = FindAvailableSequenceRange(1);
+            sequence_number = value >= 0x7FFFFFFF ? 1 : value + 1;
+            return value;
+        }
+
+        private uint FindAvailableSequenceRange(int count)
+        {
+            uint candidate = sequence_number;
+            // Each failed range skips at least one occupied sequence, including command IDs.
+            for (int attempt = 0; attempt <= submitted_messages.Count + commands_queue.Count; attempt++)
             {
-                if (delayMilliseconds > 0)
+                if (candidate == 0 || (ulong)candidate + (uint)count - 1 > 0x7FFFFFFF)
+                    candidate = 1;
+                bool available = true;
+                for (uint offset = 0; offset < count; offset++)
                 {
-                    await Task.Delay(delayMilliseconds).ConfigureAwait(false);
+                    uint sequence = candidate + offset;
+                    if (submitted_messages.ContainsKey(sequence) || commands_queue.ContainsKey(sequence))
+                    {
+                        candidate = sequence + 1;
+                        available = false;
+                        break;
+                    }
                 }
+                if (available)
+                    return candidate;
+            }
+            throw new InvalidOperationException("No free SMPP sequence range.");
+        }
 
-                Client client;
-                lock (Gate.Clients)
-                {
-                    Gate.Clients.TryGetValue(channel_name, out client);
-                }
+        protected void BeginSession(TcpClient client, bool bound)
+        {
+            tcp_client = client;
+            tcp_stream = client.GetStream();
+            tcp_stream.WriteTimeout = timeout;
+            connected = bound;
+            pendingBindSequence = null;
+            _partial_pdu = "";
+            invalidFraming = false;
+            sessionGeneration++;
+            enquire_link_timer.Start();
+            timeout_timer.Start();
+        }
 
-                if (client != null)
-                {
-                    client.Connect();
-                }
-                else
-                {
-                    Events.LogChannelEvent(channel_name, "Reconnect skipped: client is no longer registered");
-                }
-            });
+        protected int SendBind(Pdu bind, Common.CommandId responseId, string name)
+        {
+            bind.sequence_number = NextSequenceNumber();
+            pendingBindSequence = bind.sequence_number;
+            pendingBindResponse = (uint)responseId;
+            commands_queue.Add(bind.sequence_number, DateTime.UtcNow);
+            string pdu = bind.Encode();
+            // Bind bodies contain passwords and must not be included in debug logs.
+            Notify(() => Events.LogChannelEvent(channel_name, "Sending [" + name + "]"));
+            return SendPDU(pdu);
         }
 
         void enquire_link_timer_Elapsed(object sender, ElapsedEventArgs e)
         {
-            if (!Gate.Servers.ContainsKey(channel_name) &&
-                !Gate.Clients.ContainsKey(channel_name))
+            lock (SessionLock)
             {
-                Events.LogChannelEvent(channel_name, "Connection is broken");
-
-                enquire_link_timer.Stop();
-                timeout_timer.Stop();
-                ScheduleReconnect(0);
-
-                return;
-            }
-
-            if (connected)
-            {
-                SendEnquireLink();
+                if (!connected || stopped)
+                    return;
+                var request = new EnquireLink { sequence_number = NextSequenceNumber() };
+                commands_queue.Add(request.sequence_number, DateTime.UtcNow);
+                string pdu = request.Encode();
+                Notify(() => Events.LogChannelEvent(channel_name, "Sending [enquire_link]", debug ? pdu : ""));
+                SendPDU(pdu);
             }
         }
 
         internal void Receive()
         {
-            try
+            lock (SessionLock)
             {
-                // If Socket can receive
-                if (tcp_stream != null && tcp_stream.CanRead)
-                {
-                    _buffer = new byte[Common.MAX_RECEIVE_LENGTH];
-                    tcp_stream.BeginRead(_buffer, 0, _buffer.Length, receiveCallback, null);
-                }
-            }
-            catch
-            {
-                ;// Communication issues, bad stream, ignore
+                if (tcp_stream == null || stopped || ReferenceEquals(receivingStream, tcp_stream))
+                    return;
+                var stream = tcp_stream;
+                receivingStream = stream;
+                _ = Task.Run(() => ReceiveLoopAsync(stream));
             }
         }
 
-        protected void receiveCallback(IAsyncResult ar)
+        private async Task ReceiveLoopAsync(NetworkStream stream)
         {
-            int numberOfBytesRead = 0;
-            bool continueReceiving = false;
-
-            if (tcp_stream != null && tcp_stream.CanRead)
-            {
-                try
-                {
-                    numberOfBytesRead = tcp_stream.EndRead(ar);
-
-                    if (numberOfBytesRead > 0)
-                    {
-                        MessageHandler(Common.ConvertByteArrayToHexString(_buffer, numberOfBytesRead));
-                        continueReceiving = true;
-                    }
-                    else
-                    {
-                        connected = false;
-                    }
-                }
-                catch
-                {
-                    // socket errors or just trash in network, just ignore
-                }
-                finally
-                {
-                    if (continueReceiving)
-                    {
-                        Receive();
-                    }
-                }
-            }
-        }
-
-        protected void sendCallback(IAsyncResult ar)
-        {
+            var buffer = new byte[8192];
             try
             {
-                if (tcp_stream.CanWrite)
+                while (true)
                 {
-                    tcp_stream.EndWrite(ar);
-                    connected = true;
+                    int count = await stream.ReadAsync(buffer).ConfigureAwait(false);
+                    lock (SessionLock)
+                    {
+                        // A read from a closed socket must never touch its replacement session.
+                        if (!ReferenceEquals(tcp_stream, stream))
+                            return;
+                        if (count == 0)
+                        {
+                            Disconnect(true);
+                            return;
+                        }
+                        MessageHandler(Common.ConvertByteArrayToHexString(buffer, count));
+                        if (!ReferenceEquals(tcp_stream, stream))
+                            return;
+                    }
                 }
             }
-            catch
+            catch (Exception ex) when (ex is System.IO.IOException || ex is ObjectDisposedException || ex is SocketException)
             {
-                ; // Communication issues, bad stream, ignore
+                lock (SessionLock)
+                {
+                    if (!ReferenceEquals(tcp_stream, stream))
+                        return;
+                    Notify(() => Events.LogChannelEvent(channel_name, "Receive failed: " + ex.Message));
+                    Disconnect(true);
+                }
             }
         }
 
         void timeout_timer_Elapsed(object sender, ElapsedEventArgs e)
         {
-            TimeSpan span;
-
-            timeout_timer.Stop();
-
-            lock (commands_queue)
+            lock (SessionLock)
             {
-                foreach (uint key in commands_queue.Keys)
+                var now = DateTime.UtcNow;
+                multipart_messages.RemoveAll(part => now - part.submitted_dt >= MultipartLifetime);
+                if (stopped || tcp_stream == null)
+                    return;
+                if (commands_queue.Values.Any(time => (now - time).TotalMilliseconds >= timeout))
                 {
-                    span = DateTime.Now.Subtract(commands_queue[key]);
-                    if (span.TotalMilliseconds > timeout &&
-                        ((DateTime.Now.Subtract(last_pdu_time)).TotalMilliseconds > 1000))
+                    Notify(() => Events.LogChannelEvent(channel_name, "Command timeout"));
+                    Disconnect(true);
+                    return;
+                }
+                var expired = submitted_messages.Values
+                    .Where(message => (now - message.submitted_time).TotalMilliseconds >= timeout)
+                    .Select(message => message.submission).Distinct().ToArray();
+                foreach (var submission in expired)
+                {
+                    var sequences = submitted_messages.Where(pair => ReferenceEquals(pair.Value.submission, submission))
+                        .Select(pair => pair.Key).ToArray();
+                    int id = submitted_messages[sequences[0]].message_id;
+                    foreach (uint sequence in sequences)
+                        submitted_messages.Remove(sequence);
+                    if (!submission.Completed)
                     {
-                        connected = false;
-                        Events.LogChannelEvent(channel_name, "Command timeout");
-                        Events.LogChannelEvent(channel_name, "Disconnecting.... ");
-
-                        timeout_timer.Stop();
-                        enquire_link_timer.Stop();
-
-                        tcp_stream.Close();
-                        tcp_client.Close();
-                        commands_queue.Clear();
-
-                        // mark all messages which are waiting for submit_sm_resp
-                        // as timed out
-                        lock (submitted_messages)
-                        {
-                            foreach (submitted_message message in submitted_messages.Values)
-                            {
-                                Events.LogMessageChangeStatusEvent(message.message_id, Common.MessageStatus.timeout);
-                            }
-                        }
-                        submitted_messages.Clear();
-
-                        multipart_messages.Clear();
-
-                        if (!is_server)
-                        {
-                            ScheduleReconnect();
-                        }
-                        else
-                        {
-                            Gate.Servers.Remove(channel_name);
-                        }
-
-                        return;
+                        submission.Completed = true;
+                        Notify(() => Events.LogMessageChangeStatusEvent(id, Common.MessageStatus.timeout));
                     }
                 }
+                // The timer remains active after a healthy tick, including while idle.
+            }
+        }
+
+        protected void Disconnect(bool reconnect)
+        {
+            lock (SessionLock)
+            {
+                connected = false;
+                pendingBindSequence = null;
+                enquire_link_timer.Stop();
+                timeout_timer.Stop();
+                var stream = tcp_stream;
+                var client = tcp_client;
+                tcp_stream = null;
+                tcp_client = null;
+                sessionGeneration++;
+                stream?.Dispose();
+                client?.Dispose();
+                commands_queue.Clear();
+                _partial_pdu = "";
+                // Already-ACKed segments must survive transient disconnects until their lifetime expires.
+                var pending = submitted_messages.Values.Where(message => !message.submission.Completed)
+                    .Select(message => message.message_id).Distinct().ToArray();
+                submitted_messages.Clear();
+                if (reconnect)
+                    ScheduleReconnect();
+                foreach (int id in pending)
+                    Notify(() => Events.LogMessageChangeStatusEvent(id, Common.MessageStatus.timeout));
             }
         }
 
         public int SendPDU(string pdu)
         {
-            byte[] msg;
-
-            msg = Common.ConvertHexStringToByteArray(pdu);
-
-            sequence_number++;
-            try
+            byte[] bytes = Common.ConvertHexStringToByteArray(pdu);
+            lock (SessionLock)
             {
-                tcp_stream.BeginWrite(msg, 0, msg.Length, sendCallback, null);
-            }
-            catch
-            {
-                if (!connected)
-                {
+                if (tcp_stream == null)
                     return 1;
-                }
-
-                connected = false;
-
-                Events.LogChannelEvent(channel_name, "Command sending time out");
-                Events.LogChannelEvent(channel_name, "Disconnecting.... ");
-
-                timeout_timer.Stop();
-                enquire_link_timer.Stop();
-
-                tcp_stream.Close();
-                tcp_client.Close();
-                commands_queue.Clear();
-
-                // mark all messages which are waiting for submit_sm_resp
-                // as timed out
-                lock (submitted_messages)
+                try
                 {
-                    foreach (submitted_message message in submitted_messages.Values)
-                    {
-                        Events.LogMessageChangeStatusEvent(message.message_id, Common.MessageStatus.timeout);
-                    }
+                    // Serialize complete frames; in particular, finish unbind_resp before closing.
+                    tcp_stream.WriteTimeout = timeout;
+                    tcp_stream.Write(bytes, 0, bytes.Length);
+                    return 0;
                 }
-                submitted_messages.Clear();
-
-                if (!is_server)
+                catch (Exception ex) when (ex is System.IO.IOException || ex is ObjectDisposedException || ex is SocketException)
                 {
-                    ScheduleReconnect();
+                    Notify(() => Events.LogChannelEvent(channel_name, "Send failed: " + ex.Message));
+                    Disconnect(true);
+                    return 502;
                 }
-                else
-                {
-                    Gate.Servers.Remove(channel_name);
-                }
-                return 502;
             }
-
-            return 0;
         }
 
         public void MessageHandler(object mess)
         {
-            var data = new List<string>();
-            int PDULength = 0;
-            last_pdu_time = DateTime.Now;
-
-            lock (_receive_lock)
+            lock (SessionLock)
             {
-                try
+                if (invalidFraming)
+                    return;
+                var data = new List<string>();
+                _partial_pdu += mess?.ToString();
+                int offset = 0;
+                while (_partial_pdu.Length - offset >= 8)
                 {
-                    _partial_pdu += mess.ToString();
-
-                    while (_partial_pdu.Length >= 8)
+                    if (!uint.TryParse(_partial_pdu.AsSpan(offset, 8), System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture, out uint length) ||
+                        length < 16 || length > Common.MAX_PDU_LENGTH)
                     {
-                        PDULength = int.Parse(_partial_pdu.Substring(0, 8), System.Globalization.NumberStyles.HexNumber);
-                        if (PDULength < 16 || PDULength > Common.MAX_PDU_LENGTH)
-                        {
-                            _partial_pdu = "";
-                            return;
-                        }
+                        Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Invalid PDU length"));
+                        invalidFraming = true;
+                        break;
+                    }
+                    if (_partial_pdu.Length - offset < length * 2)
+                        break;
+                    data.Add(_partial_pdu.Substring(offset, (int)length * 2));
+                    offset += (int)length * 2;
+                }
+                _partial_pdu = invalidFraming ? "" : _partial_pdu.Substring(offset);
 
-                        if (_partial_pdu.Length < PDULength * 2)
-                        {
-                            return;
-                        }
-
-                        data.Add(_partial_pdu.Substring(0, PDULength * 2));
-                        _partial_pdu = _partial_pdu.Substring(PDULength * 2);
+                int generation = sessionGeneration;
+                foreach (string pdu in data)
+                {
+                    if (generation != sessionGeneration)
+                        break;
+                    try { PduHandler(pdu); }
+                    catch (Exception ex)
+                    {
+                        // A complete but malformed message still needs an error response.
+                        uint command = Convert.ToUInt32(pdu.Substring(8, 8), 16);
+                        if (command == (uint)Common.CommandId.submit_sm || command == (uint)Common.CommandId.deliver_sm ||
+                            command == (uint)Common.CommandId.data_sm)
+                            SendPDU(new GenericNack
+                            {
+                                sequence_number = Convert.ToUInt32(pdu.Substring(24, 8), 16),
+                                command_status = 1 // ESME_RINVMSGLEN
+                            }.Encode());
+                        Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - PDU handling failed: " + ex.Message));
                     }
                 }
-                catch (CommandLengthException)
-                {
-                    Events.LogEvent(LogEvent.Level.Error, "Command length exception");
-                }
-                catch (Exception e1)
-                {
-                    Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1 + ":" + PDULength);
-                    _partial_pdu = "";
-                    return;
-                }
-            }
-
-            foreach (string pdu in data)
-            {
-                if (string.IsNullOrEmpty(pdu) || pdu.Length < 8) continue;
-                try
-                {
-                    PduHandler(pdu);
-                }
-                catch (Exception e1)
-                {
-                    Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1 + ":" + pdu);
-                }
+                if (invalidFraming && generation == sessionGeneration)
+                    Disconnect(true); // TCP has no marker with which to recover a frame boundary.
             }
         }
 
-        /// <summary>
-        /// Gets PDU from stream, parses 
-        /// </summary>
-        /// <param name="pdu">PDU to handle</param>
+        private void HandleBindResponse(uint command, uint sequence, uint status)
+        {
+            if (pendingBindSequence != sequence || pendingBindResponse != command)
+                return;
+            commands_queue.Remove(sequence);
+            pendingBindSequence = null;
+            if (status == 0)
+            {
+                connected = true;
+                Notify(() => Events.LogChannelEvent(channel_name, "Bound successfully"));
+            }
+            else
+            {
+                Notify(() => Events.LogChannelEvent(channel_name, "Bind rejected: " + status));
+                Disconnect(true);
+            }
+        }
+
+        private void CompleteSubmission(uint sequence, uint status, string messageId)
+        {
+            if (!submitted_messages.TryGetValue(sequence, out var message))
+                return;
+            submitted_messages.Remove(sequence);
+            var submission = message.submission;
+            submission.Remaining--;
+            if (sequence == submission.FirstSequence)
+                submission.ResponseId = messageId ?? "";
+            if (submission.Completed)
+                return;
+            if (status != 0)
+            {
+                submission.Completed = true;
+                Notify(() => Events.LogMessageChangeStatusEvent(message.message_id, Common.MessageStatus.rejected, messageId ?? ""));
+            }
+            else if (submission.Remaining == 0)
+            {
+                submission.Completed = true;
+                Notify(() => Events.LogMessageChangeStatusEvent(message.message_id, Common.MessageStatus.sent, submission.ResponseId));
+            }
+        }
+
+        private bool TryAssemble(Common.MultipartMessage part, out string body)
+        {
+            body = null;
+            var now = DateTime.UtcNow;
+            multipart_messages.RemoveAll(value => now - value.submitted_dt >= MultipartLifetime);
+            if (part.num_of_parts < 1 || part.num_of_parts > 255 ||
+                part.part_num < 1 || part.part_num > part.num_of_parts)
+            {
+                Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Invalid multipart segment number"));
+                return false;
+            }
+            bool SameMessage(Common.MultipartMessage value) =>
+                value.reference == part.reference && value.sender == part.sender &&
+                value.recipient == part.recipient && value.body_format == part.body_format &&
+                value.command == part.command;
+            var matching = multipart_messages.Where(SameMessage).ToList();
+            if (matching.Any(value => value.num_of_parts != part.num_of_parts))
+            {
+                Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Conflicting multipart segment count"));
+                return false;
+            }
+            var duplicate = matching.FindIndex(value => value.part_num == part.part_num);
+            if (duplicate >= 0)
+            {
+                if (matching[duplicate].short_message != part.short_message)
+                    Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Conflicting multipart duplicate"));
+                return false;
+            }
+            multipart_messages.Add(part);
+            matching.Add(part);
+            if (matching.Count != part.num_of_parts)
+                return false;
+            body = string.Concat(matching.OrderBy(value => value.part_num).Select(value => value.short_message));
+            multipart_messages.RemoveAll(SameMessage);
+            return true;
+        }
+
         private void PduHandler(string pdu)
         {
-            string response = string.Empty;
-
-            Events.LogChannelEvent(channel_name, "Receiving [" + Common.command_id.Values[Common.command_id.IndexOfKey(uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber))] + "]", debug ? pdu : "");
-
-            switch (Common.command_id.Values[Common.command_id.IndexOfKey(uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber))])
+            uint command = uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber);
+            uint status = uint.Parse(pdu.Substring(16, 8), System.Globalization.NumberStyles.HexNumber);
+            uint sequence = uint.Parse(pdu.Substring(24, 8), System.Globalization.NumberStyles.HexNumber);
+            string name = Common.command_id.TryGetValue(command, out var knownName) ? knownName : "unknown";
+            Notify(() => Events.LogChannelEvent(channel_name, "Receiving [" + name + "]", debug ? pdu : ""));
+            switch ((Common.CommandId)command)
             {
-                case "generic_nack":
-                    // they do not understand my command 
-                    // may be a bug in my pdu
+                case Common.CommandId.bind_transceiver_resp:
+                case Common.CommandId.bind_transmitter_resp:
+                case Common.CommandId.bind_receiver_resp:
+                    HandleBindResponse(command, sequence, status);
                     break;
-                case "bind_transceiver_resp":
-                    var bind_transceiver = new BindTransceiverResp(pdu);
-                    commands_queue.Remove(bind_transceiver.sequence_number);
-                    if (bind_transceiver.command_status != 0)
-                    {
-                        Events.LogChannelEvent(channel_name, "Error: " + Common.command_status[bind_transceiver.command_status].description);
-                        if (!is_server)
-                        {
-                            ScheduleReconnect();
-                        }
-                    }
-                    break;
-                case "bind_transmitter_resp":
-                    var bind_transmitter = new BindTransmitterResp(pdu);
-                    commands_queue.Remove(bind_transmitter.sequence_number);
-                    if (bind_transmitter.command_status != 0)
-                    {
-                        Events.LogChannelEvent(channel_name, "Error: " + Common.command_id[bind_transmitter.command_status]);
-
-                        if (!is_server)
-                        {
-                            ScheduleReconnect();
-                        }
-                    }
-
-                    break;
-                case "bind_receiver_resp":
-                    var bind_receiver = new BindReceiverResp(pdu);
-                    commands_queue.Remove(bind_receiver.sequence_number);
-                    if (bind_receiver.command_status != 0)
-                    {
-                        Events.LogChannelEvent(channel_name, "Error: " + Common.command_id[bind_receiver.command_status]);
-                        Quit();
-
-                        if (!is_server)
-                        {
-                            ScheduleReconnect();
-                        }
-                    }
-
-                    break;
-                case "submit_sm":
-                    var submit_sm_s = new SubmitSm(pdu);
-                    var submit_sm_resp_s = new SubmitSmResp();
-
-                    submit_sm_resp_s.MessageID = Guid.NewGuid().ToString("n");
-                    submit_sm_resp_s.sequence_number = submit_sm_s.sequence_number;
-                    response = submit_sm_resp_s.Encode();
-
-                    Events.LogChannelEvent(channel_name, "Message received from " + submit_sm_s.Sender + " to " + submit_sm_s.Recipient);
-                    Events.LogChannelEvent(channel_name, "Sending [submit_sm_resp]");
-                    SendPDU(response);
-
-                    if (submit_sm_s.isMultipart)
-                    {
-                        int parts = 0;
-                        lock (multipart_messages)
-                        {
-                            multipart_messages.Add(submit_sm_s.MultipartMessage);
-
-                            foreach (Common.MultipartMessage mm in multipart_messages)
-                            {
-                                if (mm.reference == submit_sm_s.MultipartMessage.reference)
-                                {
-                                    parts++;
-                                }
-                            }
-                        }
-                        if (parts == submit_sm_s.MultipartMessage.num_of_parts)
-                        {
-                            var for_remove = new List<Common.MultipartMessage>();
-                            var short_message = new StringBuilder();
-                            var str = new string[parts];
-                            lock (multipart_messages)
-                            {
-                                foreach (Common.MultipartMessage mm in multipart_messages)
-                                {
-                                    if (mm.reference == submit_sm_s.MultipartMessage.reference)
-                                    {
-                                        for_remove.Add(mm);
-                                        try
-                                        {
-                                            str[mm.part_num - 1] = mm.short_message;
-                                        }
-                                        catch (Exception e1)
-                                        {
-                                            Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1 + "  " + pdu);
-                                        }
-                                    }
-                                }
-
-                                foreach (Common.MultipartMessage k in for_remove)
-                                {
-                                    multipart_messages.Remove(k);
-                                }
-                            }
-                            // can be required
-                            // short_message.Append("(" + submit_sm_s.MultipartMessage.reference.ToString() + ") ");
-                            try
-                            {
-                                for (int k = 0; k < parts; k++)
-                                {
-                                    short_message.Append(str[k]);
-                                }
-                                submit_sm_s.Body = short_message.ToString();
-                            }
-                            catch (Exception e1)
-                            {
-                                Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1 + "  " + pdu);
-                            }
-
-                            Events.LogNewMessageEvent(channel_name, submit_sm_resp_s.MessageID, submit_sm_s.Sender, submit_sm_s.Recipient, submit_sm_s.Body, submit_sm_s.BodyFormat, submit_sm_s.RegisteredDelivery);
-                        }
-                    }
+                case Common.CommandId.generic_nack:
+                    CompleteSubmission(sequence, status == 0 ? 1u : status, "");
+                    if (pendingBindSequence == sequence)
+                        Disconnect(true);
                     else
-                    {
-                        Events.LogNewMessageEvent(channel_name, submit_sm_resp_s.MessageID, submit_sm_s.Sender, submit_sm_s.Recipient, submit_sm_s.Body, submit_sm_s.BodyFormat, submit_sm_s.RegisteredDelivery);
-                    }
+                        commands_queue.Remove(sequence);
                     break;
-                case "submit_sm_resp":
-                    try
+                case Common.CommandId.submit_sm:
+                    var submit = new SubmitSm(pdu) { Is8bit = use8bit };
+                    if (use8bit)
+                        submit.Decode();
+                    var submitResponse = new SubmitSmResp { sequence_number = sequence, MessageID = Guid.NewGuid().ToString("n") };
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [submit_sm_resp]"));
+                    SendPDU(submitResponse.Encode());
+                    if (submit.isMultipart)
                     {
-                        var submit_sm_resp = new SubmitSmResp(pdu);
-                        if (submitted_messages.ContainsKey(submit_sm_resp.sequence_number))
-                        {
-                            var submitSmRespMessageId = "";
-                            if (!string.IsNullOrEmpty(submit_sm_resp.MessageID))
-                            {
-                                submitSmRespMessageId = submit_sm_resp.MessageID;
-                            }
-
-                            if (submit_sm_resp.command_status == 0)
-                            {
-                                Events.LogMessageChangeStatusEvent(
-                                    submitted_messages[submit_sm_resp.sequence_number].message_id, Common.MessageStatus.sent, submitSmRespMessageId);
-                            }
-                            else
-                            {
-                                if (Common.command_status.ContainsKey(submit_sm_resp.command_status))
-                                {
-                                    Events.LogMessageChangeStatusEvent(
-                                        submitted_messages[submit_sm_resp.sequence_number].message_id,
-                                        Common.MessageStatus.rejected, submitSmRespMessageId);
-                                }
-                                else
-                                {
-                                    Events.LogMessageChangeStatusEvent(
-                                        submitted_messages[submit_sm_resp.sequence_number].message_id,
-                                        Common.MessageStatus.sent);
-                                }
-                            }
-                            submitted_messages.Remove(submit_sm_resp.sequence_number);
-                        }
-
-                        if (submit_sm_resp.command_status != 0)
-                        {
-                            Events.LogChannelEvent(channel_name, "Error sending: " + submit_sm_resp.command_status);
-                        }
-                        else
-                        {
-                            Events.LogChannelEvent(channel_name, "Message reference: " + submit_sm_resp.MessageID);
-                        }
-                    }
-                    catch (Exception e1)
-                    {
-                        Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1.ToString());
-                    }
-                    break;
-                case "enquire_link":
-                    var enquire_link = new EnquireLink(pdu);
-                    var enquire_link_resp = new EnquireLinkResp();
-
-                    enquire_link_resp.sequence_number = enquire_link.sequence_number;
-                    response = enquire_link_resp.Encode();
-                    SendPDU(response);
-                    Events.LogChannelEvent(channel_name, "Sending [enquire_link_resp]", debug ? response : "");
-                    break;
-                case "enquire_link_resp":
-                    var enquire_link_resp_o = new EnquireLinkResp(pdu);
-                    commands_queue.Remove(enquire_link_resp_o.sequence_number);
-                    break;
-                case "deliver_sm":
-                    DeliverSm deliver_sm;
-                    try
-                    {
-                        deliver_sm = new DeliverSm(pdu);
-                        deliver_sm.Is8bit = use8bit;
-                        deliver_sm.Decode();
-                    }
-                    catch (CommandLengthException)
-                    {
-                        Events.LogEvent(LogEvent.Level.Error, channel_name + ". Command length error.");
-                        break;
-                    }
-                    catch (Exception e1)
-                    {
-                        Events.LogEvent(LogEvent.Level.Error, channel_name + ". Error: " + e1.Message);
-                        break;
-                    }
-
-                    // Send Resp
-                    var deliver_sm_resp = new DeliverSmResp();
-                    deliver_sm_resp.MessageID = Guid.NewGuid().ToString("n");
-                    deliver_sm_resp.sequence_number = deliver_sm.sequence_number;
-                    response = deliver_sm_resp.Encode();
-
-                    Events.LogChannelEvent(channel_name, "Sending [deliver_sm_resp]", debug ? response : "");
-                    SendPDU(response);
-
-                    // Multipart message
-                    if (deliver_sm.isMultipart)
-                    {
-                        int parts = 0;
-                        lock (multipart_messages)
-                        {
-                            multipart_messages.Add(deliver_sm.MultipartMessage);
-
-
-                            foreach (Common.MultipartMessage mm in multipart_messages)
-                            {
-                                if (mm.reference == deliver_sm.MultipartMessage.reference)
-                                {
-                                    parts++;
-                                }
-                            }
-                        }
-                        if (parts == deliver_sm.MultipartMessage.num_of_parts)
-                        {
-                            List<Common.MultipartMessage> for_remove = new List<Common.MultipartMessage>();
-                            StringBuilder short_message = new StringBuilder();
-                            string[] str = new string[parts];
-
-                            lock (multipart_messages)
-                            {
-                                foreach (Common.MultipartMessage mm in multipart_messages)
-                                {
-                                    if (mm.reference == deliver_sm.MultipartMessage.reference)
-                                    {
-                                        for_remove.Add(mm);
-                                        try
-                                        {
-                                            str[mm.part_num - 1] = mm.short_message;
-                                        }
-                                        catch (Exception e1)
-                                        {
-                                            Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1.ToString() + "  " + pdu);
-                                        }
-                                    }
-                                }
-
-                                foreach (Common.MultipartMessage k in for_remove)
-                                {
-                                    multipart_messages.Remove(k);
-                                }
-                            }
-
-                            try
-                            {
-                                for (int k = 0; k < parts; k++)
-                                {
-                                    short_message.Append(str[k]);
-                                }
-                                deliver_sm.Body = short_message.ToString();
-                            }
-                            catch (Exception e1)
-                            {
-                                Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1.ToString() + "  " + pdu);
-                            }
-                        }
-                        else
-                        {
-                            // Multipart message is not built yet, wait for the rest 
+                        if (!TryAssemble(submit.MultipartMessage, out var assembledSubmit))
                             break;
-                        }
-
+                        submit.Body = assembledSubmit;
                     }
-
-                    // Delivery report
-                    if (deliver_sm.ESMClass == 4)
+                    Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + submit.Sender + " to " + submit.Recipient));
+                    Notify(() => Events.LogNewMessageEvent(channel_name, submitResponse.MessageID, submit.Sender, submit.Recipient,
+                        submit.Body, submit.BodyFormat, submit.RegisteredDelivery));
+                    break;
+                case Common.CommandId.deliver_sm:
+                    var deliver = new DeliverSm(pdu) { Is8bit = use8bit };
+                    deliver.Decode();
+                    var deliverResponse = new DeliverSmResp { sequence_number = sequence, MessageID = Guid.NewGuid().ToString("n") };
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [deliver_sm_resp]"));
+                    SendPDU(deliverResponse.Encode());
+                    if (deliver.isMultipart)
                     {
-                        Events.LogChannelEvent(channel_name, "Message ref: " + deliver_sm.Reference + " " + deliver_sm.DeliveryStatus, debug ? pdu : "");
-                        if (deliver_sm.DeliveryStatus.ToUpper() == "DELIVR")
-                        {
-                            Events.LogMessageDeliverReportEvent(deliver_sm.Reference, Common.MessageStatus.delivered_ACK_received);
-                        }
-                        if (deliver_sm.DeliveryStatus.ToUpper() == "EXPIRE")
-                        {
-                            Events.LogMessageDeliverReportEvent(deliver_sm.Reference, Common.MessageStatus.ACK_expired);
-                        }
-                        if (deliver_sm.DeliveryStatus.ToUpper() == "UNKNOW")
-                        {
-                            Events.LogMessageDeliverReportEvent(deliver_sm.Reference, Common.MessageStatus.unknown_recipient);
-                        }
-                        if (deliver_sm.DeliveryStatus.ToUpper() == "ACCEPT")
-                        {
-                            Events.LogMessageDeliverReportEvent(deliver_sm.Reference, Common.MessageStatus.received_routed);
-                        }
-                        if (deliver_sm.DeliveryStatus.ToUpper() == "REJECT")
-                        {
-                            Events.LogMessageDeliverReportEvent(deliver_sm.Reference, Common.MessageStatus.rejected);
-                        }
-                        if (deliver_sm.DeliveryStatus.ToUpper() == "UNDELI")
-                        {
-                            Events.LogMessageDeliverReportEvent(deliver_sm.Reference, Common.MessageStatus.message_undeliverable);
-                        }
-
+                        if (!TryAssemble(deliver.MultipartMessage, out var assembledDeliver))
+                            break;
+                        deliver.Body = assembledDeliver;
+                    }
+                    if ((deliver.ESMClass & 0x3C) == 4)
+                    {
+                        ReportDelivery(deliver);
                         break;
                     }
-
-                    // Log message
-                    Events.LogChannelEvent(channel_name, "Message received from " + deliver_sm.Sender + " to " + deliver_sm.Recipient, debug ? pdu : "");
-                    Events.LogNewMessageEvent(channel_name, deliver_sm_resp.MessageID, deliver_sm.Sender, deliver_sm.Recipient, deliver_sm.Body, deliver_sm.BodyFormat, deliver_sm.RegisteredDelivery);
-
+                    Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + deliver.Sender + " to " + deliver.Recipient));
+                    Notify(() => Events.LogNewMessageEvent(channel_name, deliverResponse.MessageID, deliver.Sender, deliver.Recipient,
+                        deliver.Body, deliver.BodyFormat, deliver.RegisteredDelivery));
                     break;
-                case "deliver_sm_resp":
-                    try
+                case Common.CommandId.data_sm:
+                    var data = new DataSm(pdu);
+                    var dataResponse = new DataSmResp { sequence_number = sequence, MessageID = Guid.NewGuid().ToString("n") };
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [data_sm_resp]"));
+                    SendPDU(dataResponse.Encode());
+                    if (data.isMultipart)
                     {
-                        var deliver_sm_resp2 = new DeliverSmResp(pdu);
-                        if (submitted_messages.ContainsKey(deliver_sm_resp2.sequence_number))
-                        {
-                            var deliverSmRespMessageId = "";
-                            if (!string.IsNullOrEmpty(deliver_sm_resp2.MessageID))
-                            {
-                                deliverSmRespMessageId = deliver_sm_resp2.MessageID;
-                            }
-
-                            if (deliver_sm_resp2.command_status == 0)
-                            {
-                                if (registered_delivery != 1 && submitted_messages[deliver_sm_resp2.sequence_number].registered_delivery)
-                                {
-                                    Events.LogMessageChangeStatusEvent(submitted_messages[deliver_sm_resp2.sequence_number].message_id, Common.MessageStatus.sent, deliverSmRespMessageId);
-                                }
-                            }
-                            else
-                            {
-                                if (Common.command_status.ContainsKey(deliver_sm_resp2.command_status))
-                                {
-                                    Events.LogMessageChangeStatusEvent(
-                                        submitted_messages[deliver_sm_resp2.sequence_number].message_id,
-                                        Common.MessageStatus.rejected, deliverSmRespMessageId);
-                                }
-                                else
-                                {
-                                    Events.LogMessageChangeStatusEvent(
-                                        submitted_messages[deliver_sm_resp2.sequence_number].message_id,
-                                        Common.MessageStatus.sent, deliverSmRespMessageId);
-                                }
-                            }
-                            submitted_messages.Remove(deliver_sm_resp2.sequence_number);
-                        }
-
-                        if (deliver_sm_resp2.command_status != 0)
-                        {
-                            Events.LogChannelEvent(channel_name, "Error sending: " + deliver_sm_resp2.command_status);
-                        }
-                        else
-                        {
-                            Events.LogChannelEvent(channel_name, "Message reference: " + deliver_sm_resp2.MessageID);
-                        }
+                        if (!TryAssemble(data.MultipartMessage, out var assembledData))
+                            break;
+                        data.Body = assembledData;
                     }
-                    catch (Exception e1)
-                    {
-                        Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + e1);
-                    }
+                    Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + data.Sender + " to " + data.Recipient));
+                    Notify(() => Events.LogNewMessageEvent(channel_name, dataResponse.MessageID, data.Sender, data.Recipient,
+                        data.Body, data.BodyFormat, data.RegisteredDelivery));
                     break;
-                case "data_sm":
-                    var data_sm_s = new DataSm(pdu);
-                    var data_sm_resp_s = new DataSmResp();
-
-                    data_sm_resp_s.MessageID = Guid.NewGuid().ToString("n");
-                    data_sm_resp_s.sequence_number = data_sm_s.sequence_number;
-                    response = data_sm_resp_s.Encode();
-
-                    Events.LogChannelEvent(channel_name, "Message received from " + data_sm_s.Sender + " to " + data_sm_s.Recipient, debug ? pdu : "");
-                    Events.LogChannelEvent(channel_name, "Sending [data_sm_resp]");
-                    SendPDU(response);
-
-                    Events.LogNewMessageEvent(channel_name, data_sm_resp_s.MessageID, data_sm_s.Sender, data_sm_s.Recipient, data_sm_s.Body, data_sm_s.BodyFormat, data_sm_s.RegisteredDelivery);
-
+                case Common.CommandId.submit_sm_resp:
+                    CompleteSubmission(sequence, status, new SubmitSmResp(pdu).MessageID);
                     break;
-                case "data_sm_resp":
-                    try
-                    {
-                        var data_sm_resp = new DataSmResp(pdu);
-                        if (submitted_messages.ContainsKey(data_sm_resp.sequence_number))
-                        {
-                            var dataSmRespMessageId = "";
-                            if (!string.IsNullOrEmpty(data_sm_resp.MessageID))
-                            {
-                                dataSmRespMessageId = data_sm_resp.MessageID;
-                            }
-
-                            if (data_sm_resp.command_status == 0)
-                            {
-                                if (registered_delivery != 1 && submitted_messages[data_sm_resp.sequence_number].registered_delivery)
-                                {
-                                    Events.LogMessageChangeStatusEvent(submitted_messages[data_sm_resp.sequence_number].message_id, Common.MessageStatus.sent, dataSmRespMessageId);
-                                }
-                            }
-                            else
-                            {
-                                if (Common.command_status.ContainsKey(data_sm_resp.command_status))
-                                {
-                                    Events.LogMessageChangeStatusEvent(submitted_messages[data_sm_resp.sequence_number].message_id, Common.MessageStatus.rejected, dataSmRespMessageId);
-                                }
-                                else
-                                {
-                                    Events.LogMessageChangeStatusEvent(submitted_messages[data_sm_resp.sequence_number].message_id, Common.MessageStatus.sent, dataSmRespMessageId);
-                                }
-                            }
-                            submitted_messages.Remove(data_sm_resp.sequence_number);
-                        }
-
-                        if (data_sm_resp.command_status != 0)
-                        {
-                            Events.LogChannelEvent(channel_name, "Error sending: " + data_sm_resp.command_status);
-                        }
-                        else
-                        {
-                            Events.LogChannelEvent(channel_name, "Message reference: " + data_sm_resp.MessageID);
-                        }
-                    }
-                    catch (Exception e1)
-                    {
-                        Events.LogEvent(LogEvent.Level.Error, channel_name + ". error: " + e1);
-                    }
+                case Common.CommandId.deliver_sm_resp:
+                    CompleteSubmission(sequence, status, new DeliverSmResp(pdu).MessageID);
                     break;
-                case "unbind":
-                    var unbind = new Unbind(pdu);
-                    var unbind_resp = new UnbindResp();
-                    unbind_resp.sequence_number = unbind.sequence_number;
-                    response = unbind_resp.Encode();
-                    SendPDU(response);
-
-                    Events.LogChannelEvent(channel_name, "Sending [unbind_resp]", debug ? response : "");
-
-                    enquire_link_timer.Stop();
-                    timeout_timer.Stop();
-
-                    tcp_stream.Close();
-                    tcp_client.Close();
-
-                    if (is_server)
-                    {
-                        Gate.Servers.Remove(channel_name);
-                    }
-
-                    Events.LogChannelEvent(channel_name, "Disconnected");
-
-                    // should reconnect if it was a client
-                    if (!is_server)
-                    {
-                        ScheduleReconnect();
-                    }
+                case Common.CommandId.data_sm_resp:
+                    CompleteSubmission(sequence, status, new DataSmResp(pdu).MessageID);
                     break;
-                case "unbind_resp":
-                    ;
+                case Common.CommandId.enquire_link:
+                    var response = new EnquireLinkResp { sequence_number = sequence };
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [enquire_link_resp]"));
+                    SendPDU(response.Encode());
+                    break;
+                case Common.CommandId.enquire_link_resp:
+                    commands_queue.Remove(sequence);
+                    break;
+                case Common.CommandId.unbind:
+                    SendPDU(new UnbindResp { sequence_number = sequence }.Encode());
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [unbind_resp]"));
+                    Disconnect(true);
+                    Notify(() => Events.LogChannelEvent(channel_name, "Disconnected"));
+                    break;
+                case Common.CommandId.unbind_resp:
+                case Common.CommandId.alert_notification:
+                case Common.CommandId.outbind:
                     break;
                 default:
-                    Events.LogChannelEvent(channel_name, "Receiving unknown command", pdu);
+                    // Never acknowledge an unknown request as successful or NACK a response.
+                    if ((command & 0x80000000) == 0)
+                        SendPDU(new GenericNack { sequence_number = sequence, command_status = 3 }.Encode());
                     break;
             }
         }
 
-        private void SendEnquireLink()
+        private void ReportDelivery(DeliverSm deliver)
         {
-            string pdu;
-            var enquire_link = new EnquireLink();
-
-            enquire_link.sequence_number = sequence_number;
-            commands_queue.Add(sequence_number, DateTime.Now);
-
-            pdu = enquire_link.Encode();
-            Events.LogChannelEvent(channel_name, "Sending [enquire_link]", debug ? pdu : "");
-            SendPDU(pdu);
-        }
-
-        /// <summary>
-        /// Sends delivery report of the message
-        /// </summary>
-        /// <param name="messageId"></param>
-        /// <param name="status"></param>
-        public void SubmitDeliveryReport(string messageId, Common.MessageStatus status)
-        {
-            string pdu;
-            string messageStatus;
-
-            switch (status)
+            // Reparse after multipart assembly so ID and status can be in different segments.
+            deliver.ParseDeliveryReport();
+            Common.MessageStatus? status = deliver.DeliveryStatus switch
             {
-                case Common.MessageStatus.ACK_expired:
-                case Common.MessageStatus.delivered_ACK_received:
-                case Common.MessageStatus.duplicate_ACK_detected:
-                case Common.MessageStatus.received_routed:
-                case Common.MessageStatus.sent:
-                case Common.MessageStatus.submitted_waiting_for_ACK:
-                    messageStatus = "DELIVRD";
-                    break;
-                case Common.MessageStatus.queued:
-                case Common.MessageStatus.received_waiting_to_be_processed:
-                case Common.MessageStatus.scheduled:
-                    messageStatus = "ACCEPTD";
-                    break;
-                case Common.MessageStatus.generic_error:
-                case Common.MessageStatus.locked_by_system:
-                case Common.MessageStatus.NACK_received:
-                case Common.MessageStatus.rejected:
-                case Common.MessageStatus.out_of_balance:
-                    messageStatus = "REJECTD";
-                    break;
-                case Common.MessageStatus.message_undeliverable:
-                case Common.MessageStatus.received_route_failure:
-                case Common.MessageStatus.received_no_route_specified:
-                case Common.MessageStatus.no_channel_can_handle_message:
-                    messageStatus = "UNDELIV";
-                    break;
-                case Common.MessageStatus.unknown_recipient:
-                    messageStatus = "UNKNOWN";
-                    break;
-                default:
-                    messageStatus = "DELIVRD";
-                    break;
-            }
-
-            var deliver_sm = new DeliverSm(Events);
-            deliver_sm.sequence_number = sequence_number;
-            deliver_sm.Recipient = "";
-            deliver_sm.Sender = "";
-            deliver_sm.BodyFormat = "ascii";
-            deliver_sm.ESMClass = 4;
-            deliver_sm.IsDeliveryReport = true;
-            var short_message = new StringBuilder();
-            short_message.Append("id:" + messageId);
-            short_message.Append(" sub:001");
-            if (messageStatus == "DELIVRD")
+                "DELIVR" => Common.MessageStatus.delivered_ACK_received,
+                "EXPIRE" => Common.MessageStatus.ACK_expired,
+                "UNKNOW" => Common.MessageStatus.unknown_recipient,
+                "ACCEPT" => Common.MessageStatus.received_routed,
+                "REJECT" => Common.MessageStatus.rejected,
+                "UNDELI" or "DELETE" => Common.MessageStatus.message_undeliverable,
+                "ENROUT" => Common.MessageStatus.submitted_waiting_for_ACK,
+                _ => null
+            };
+            if (status == null || string.IsNullOrWhiteSpace(deliver.Reference))
             {
-                short_message.Append(" dlvrd:001");
-            }
-            else
-            {
-                short_message.Append(" dlvrd:000");
-            }
-            short_message.Append(" submit date:" + DateTime.Now.ToString("yyMMddHHmm"));
-            short_message.Append(" done date:" + DateTime.Now.ToString("yyMMddHHmm"));
-            short_message.Append(" stat:" + messageStatus);
-            short_message.Append(" err:0");
-            short_message.Append(" text:");
-            deliver_sm.Body = short_message.ToString();
-            pdu = deliver_sm.EncodeM()[0];
-
-            Events.LogChannelEvent(channel_name, "Sending [deliver_sm] report", debug ? pdu : "");
-            SendPDU(pdu);
-        }
-
-        /// <summary>
-        /// Closes connection, sends unbind command, stops timers
-        /// </summary>
-        public void Quit()
-        {
-            enquire_link_timer.Stop();
-            timeout_timer.Stop();
-
-            if (!connected)
-            {
-                KillConnection();
+                Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Delivery report has no valid ID/status"));
                 return;
             }
-
-            connected = false;
-
-            var unbind = new Unbind();
-            unbind.sequence_number = sequence_number;
-            string pdu = unbind.Encode();
-            SendPDU(pdu);
-            Events.LogChannelEvent(channel_name, "Sending [unbind]", debug ? pdu : "");
-
-            commands_queue.Clear();
-            submitted_messages.Clear();
-            multipart_messages.Clear();
-
-            KillConnection();
+            Notify(() => Events.LogChannelEvent(channel_name, "Message ref: " + deliver.Reference + " " + deliver.DeliveryStatus));
+            Notify(() => Events.LogMessageDeliverReportEvent(deliver.Reference, status.Value));
         }
 
-        private void KillConnection()
+        public void SubmitDeliveryReport(string messageId, Common.MessageStatus status)
         {
-            if (tcp_client != null)
+            lock (SessionLock)
             {
-                try
+                string messageStatus = status switch
                 {
-                    tcp_client.Close();
-                }
-                catch (SocketException)
+                    Common.MessageStatus.delivered_ACK_received or Common.MessageStatus.duplicate_ACK_detected => "DELIVRD",
+                    Common.MessageStatus.ACK_expired or Common.MessageStatus.timeout => "EXPIRED",
+                    Common.MessageStatus.queued or Common.MessageStatus.received_waiting_to_be_processed or
+                        Common.MessageStatus.scheduled or Common.MessageStatus.received_routed => "ACCEPTD",
+                    Common.MessageStatus.sent or Common.MessageStatus.submitted_waiting_for_ACK => "ENROUTE",
+                    Common.MessageStatus.generic_error or Common.MessageStatus.locked_by_system or
+                        Common.MessageStatus.NACK_received or Common.MessageStatus.rejected or Common.MessageStatus.out_of_balance => "REJECTD",
+                    Common.MessageStatus.message_undeliverable or Common.MessageStatus.received_route_failure or
+                        Common.MessageStatus.received_no_route_specified or Common.MessageStatus.no_channel_can_handle_message => "UNDELIV",
+                    _ => "UNKNOWN"
+                };
+                var report = new DeliverSm(Events)
                 {
-                    // can be already closed/dropped
-                }
+                    sequence_number = NextSequenceNumber(), Sender = "", Recipient = "", BodyFormat = "ascii",
+                    IsDeliveryReport = true,
+                    Body = "id:" + messageId + " sub:001 dlvrd:" + (messageStatus == "DELIVRD" ? "001" : "000") +
+                        " submit date:" + DateTime.UtcNow.ToString("yyMMddHHmm") +
+                        " done date:" + DateTime.UtcNow.ToString("yyMMddHHmm") + " stat:" + messageStatus + " err:0 text:"
+                };
+                if (report.Body.Length > Common.SINGLE_ASCII_MESSAGE_LENGTH)
+                    report.LargeMessageHandleMethod = 2;
+                string pdu = report.EncodeM()[0];
+                Notify(() => Events.LogChannelEvent(channel_name, "Sending [deliver_sm] report", debug ? pdu : ""));
+                SendPDU(pdu);
             }
+        }
 
-            if (tcp_stream != null)
+        /// <summary>Stops this connection permanently and unregisters it. Remote disconnects retain registrations.</summary>
+        public void Quit()
+        {
+            lock (SessionLock)
             {
-                try
+                stopped = true;
+                CancelReconnect();
+                CancelConnectionAttempt();
+                if (connected)
                 {
-                    tcp_stream.Close();
+                    var unbind = new Unbind { sequence_number = NextSequenceNumber() };
+                    SendPDU(unbind.Encode());
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [unbind]"));
                 }
-                catch (SocketException)
+                Disconnect(false);
+                multipart_messages.Clear();
+                if (is_server)
                 {
-                    // can be already closed/dropped
+                    lock (Gate.Servers)
+                        if (Gate.Servers.TryGetValue(channel_name, out var server) && ReferenceEquals(server, this))
+                            Gate.Servers.Remove(channel_name);
                 }
-            }
-
-            tcp_stream = null;
-            tcp_client = null;
-
-            if (!is_server)
-            {
-                Gate.Clients.Remove(channel_name);
-            }
-            else
-            {
-                Gate.Servers.Remove(channel_name);
+                else
+                {
+                    lock (Gate.Clients)
+                        if (Gate.Clients.TryGetValue(channel_name, out var client) && ReferenceEquals(client, this))
+                            Gate.Clients.Remove(channel_name);
+                }
             }
         }
 
         protected bool TryTrackSubmittedMessages(uint firstSequenceNumber, int partCount, submitted_message message)
         {
-            lock (submitted_messages)
+            lock (SessionLock)
             {
-                for (var part = 0; part < partCount; part++)
-                {
-                    if (submitted_messages.ContainsKey(firstSequenceNumber + (uint)part))
+                for (int i = 0; i < partCount; i++)
+                    if (submitted_messages.ContainsKey(firstSequenceNumber + (uint)i) || commands_queue.ContainsKey(firstSequenceNumber + (uint)i))
                     {
+                        sequence_number = firstSequenceNumber + (uint)i + 1;
                         return false;
                     }
-                }
-
-                for (var part = 0; part < partCount; part++)
-                {
-                    submitted_messages.Add(firstSequenceNumber + (uint)part, message);
-                }
+                message.submission = new Submission { Remaining = partCount, FirstSequence = firstSequenceNumber };
+                for (int i = 0; i < partCount; i++)
+                    submitted_messages.Add(firstSequenceNumber + (uint)i, message);
+                sequence_number = firstSequenceNumber + (uint)partCount;
+                if (sequence_number > 0x7FFFFFFF)
+                    sequence_number = 1;
+                return true;
             }
-
-            return true;
         }
 
-        /// <summary>
-        /// Sends message
-        /// </summary>
-        /// <param name="message_id">Unique message id</param>
-        /// <param name="sender">Sender</param>
-        /// <param name="recipient">Recipient</param>
-        /// <param name="body">body</param>
-        /// <param name="body_format">Body format. unicode,ascii,wap_push</param>
-        /// <param name="delivery_report">Request delivery report</param>
-        /// <returns>0 if successful, 
-        /// 1 - No active connection, 
-        /// 2 - Too many messages per second
-        /// 3 - Duplicate sequence number </returns>
-        public virtual int SubmitSm(int message_id, string sender, string recipient, string body, string body_format = "ascii", bool delivery_report = true)
+        protected int SendMessage(int messageId, string sender, string recipient, bool deliveryReport,
+            string commandName, Func<uint, byte, string[]> encode)
         {
-            if (!connected)
+            string[] parts;
+            uint firstSequence;
+            int generation;
+            lock (SessionLock)
             {
-                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.received_route_failure);
-                return 1;
-            }
-
-            // check for max sms count
-            if (max_threads != 0)
-            {
-                int now_second = DateTime.Now.Second;
-                if (now_second != last_second)
+                if (!connected)
                 {
-                    last_second = now_second;
+                    Notify(() => Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.received_route_failure));
+                    return 1;
+                }
+                int second = (int)(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond & int.MaxValue);
+                if (second != last_second)
+                {
+                    last_second = second;
                     sent_during_last_second = 0;
                 }
-                else
+                if (max_threads > 0 && sent_during_last_second >= max_threads)
                 {
-                    sent_during_last_second++;
+                    Notify(() => Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.queued));
+                    return 2;
                 }
-                if (max_threads < sent_during_last_second)
+                multipart_sequence_number = multipart_sequence_number == 255 ? (byte)1 : (byte)(multipart_sequence_number + 1);
+                firstSequence = sequence_number;
+                parts = encode(firstSequence, multipart_sequence_number);
+                uint available = FindAvailableSequenceRange(parts.Length);
+                if (firstSequence != available)
                 {
-                    // messages should be resubmitted later
-                    Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
-
-                    return 2; // too many SMS per second
+                    firstSequence = available;
+                    parts = encode(firstSequence, multipart_sequence_number);
                 }
-            }
-
-            var submit_sm = new SubmitSm();
-
-            while (submitted_messages.ContainsKey(sequence_number))
-            {
-                sequence_number++;
-            }
-
-            submit_sm.sequence_number = sequence_number;
-            var sm = new submitted_message();
-            sm.message_id = message_id;
-            sm.submitted_time = DateTime.Now;
-            sm.registered_delivery = delivery_report;
-            submit_sm.Sender = sender;
-            submit_sm.Recipient = recipient;
-            submit_sm.Body = body;
-            submit_sm.BodyFormat = body_format;
-            submit_sm.Is8bit = use8bit;
-
-            submit_sm.ServiceType = system_type;
-
-            submit_sm.SourceAddrTON = source_ton;
-            submit_sm.SourceAddrNPI = source_npi;
-
-            submit_sm.DestAddrTON = destination_ton;
-            submit_sm.DestAddrNPI = destination_npi;
-
-            submit_sm.SplitBaseASCII = split_base_ascii;
-
-            submit_sm.RegisteredDelivery = delivery_report ? 1 : 0;
-
-            submit_sm.LargeMessageHandleMethod = large_message;
-            multipart_sequence_number++;
-            if (multipart_sequence_number == 255)
-            {
-                multipart_sequence_number = 1;
-            }
-            submit_sm.MultipartSequenceNumber = multipart_sequence_number;
-            string[] pdu = submit_sm.EncodeM();
-
-            if (!TryTrackSubmittedMessages(submit_sm.sequence_number, pdu.Length, sm))
-            {
-                Events.LogChannelEvent(channel_name, "Duplicate sequence number.");
-                Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.queued);
-                return 3;
-            }
-
-            Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient);
-
-            var k = pdu.Length;
-            foreach (var part in pdu)
-            {
-                Events.LogChannelEvent(channel_name, "Sending [submit_sm]", debug ? part : "");
-
-                SendPDU(part);
-                if (k != 1)
+                var message = new submitted_message
                 {
+                    message_id = messageId, submitted_time = DateTime.MaxValue, registered_delivery = deliveryReport
+                };
+                if (!TryTrackSubmittedMessages(firstSequence, parts.Length, message))
+                {
+                    Notify(() => Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.queued));
+                    return 3;
+                }
+                sent_during_last_second++;
+                generation = sessionGeneration;
+                Notify(() => Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient));
+                Notify(() => Events.LogMessageChangeStatusEvent(messageId, registered_delivery == 1 && deliveryReport
+                    ? Common.MessageStatus.submitted_waiting_for_ACK : Common.MessageStatus.received_routed));
+            }
+            for (int i = 0; i < parts.Length; i++)
+            {
+                lock (SessionLock)
+                {
+                    if (!connected || generation != sessionGeneration)
+                        return 1;
+                    uint sequence = firstSequence + (uint)i;
+                    if (!submitted_messages.TryGetValue(sequence, out var message))
+                        return 1; // This submission expired while waiting to send its next segment.
+                    message.submitted_time = DateTime.UtcNow;
+                    submitted_messages[sequence] = message;
+                    string pdu = parts[i];
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [" + commandName + "]", debug ? pdu : ""));
+                    int result = SendPDU(parts[i]);
+                    if (result != 0)
+                        return result;
+                }
+                if (i + 1 < parts.Length && multypart_delay > 0)
                     Thread.Sleep(multypart_delay);
-                }
-                k--;
-
-                if (registered_delivery == 1 && delivery_report)
-                {
-                    Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.submitted_waiting_for_ACK);
-                }
-                else
-                {
-                    Events.LogMessageChangeStatusEvent(message_id, Common.MessageStatus.received_routed);
-                }
             }
-
             return 0;
+        }
+
+        protected virtual void CancelConnectionAttempt() { }
+
+        public virtual int SubmitSm(int message_id, string sender, string recipient, string body,
+            string body_format = "ascii", bool delivery_report = true)
+        {
+            return SendMessage(message_id, sender, recipient, delivery_report, "submit_sm", (sequence, reference) =>
+                new SubmitSm
+                {
+                    sequence_number = sequence, MultipartSequenceNumber = reference,
+                    Sender = sender, Recipient = recipient, Body = body, BodyFormat = body_format,
+                    Is8bit = use8bit, ServiceType = system_type, SourceAddrTON = source_ton, SourceAddrNPI = source_npi,
+                    DestAddrTON = destination_ton, DestAddrNPI = destination_npi, SplitBaseASCII = split_base_ascii,
+                    RegisteredDelivery = registered_delivery == 1 && delivery_report ? 1 : 0,
+                    LargeMessageHandleMethod = large_message
+                }.EncodeM());
         }
     }
 }

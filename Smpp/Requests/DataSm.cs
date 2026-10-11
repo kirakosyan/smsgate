@@ -5,7 +5,7 @@ namespace Smpp.Requests
 {
     public class DataSm : Pdu
     {
-        protected string service_type;
+        protected string service_type = "";
 
         protected int source_addr_ton;
         protected int source_addr_npi;
@@ -17,10 +17,23 @@ namespace Smpp.Requests
 
         protected int esm_class;
 
-        protected string registered_delivery;
+        protected string registered_delivery = "00";
         protected int data_coding;
 
         protected string short_message;
+        private string multipart_header = "";
+
+        public bool isMultipart => multipart_header.Length != 0;
+
+        public Common.MultipartMessage MultipartMessage => new Common.MultipartMessage
+        {
+            reference = Convert.ToInt32(multipart_header.Substring(6, 2), 16),
+            submitted_dt = DateTime.UtcNow, sender = Sender, recipient = Recipient,
+            body_format = BodyFormat, command = Common.CommandId.data_sm,
+            num_of_parts = Convert.ToInt32(multipart_header.Substring(8, 2), 16),
+            part_num = Convert.ToInt32(multipart_header.Substring(10, 2), 16),
+            short_message = short_message
+        };
 
         public string Sender
         {
@@ -72,6 +85,10 @@ namespace Smpp.Requests
                     case 0:
                     case 1:
                         return "ascii";
+                    case 2:
+                        return "binary";
+                    case 3:
+                        return "latin";
                     case 8:
                         return "unicode";
                     case 245:
@@ -161,110 +178,19 @@ namespace Smpp.Requests
 
         public string[] EncodeM()
         {
-            // wap-push
-            if (data_coding == 245)
-            {
-                if (!short_message.StartsWith("0605"))
-                {
-                    var wap = new StringBuilder();
-                    string href = "";
-                    string rest = "";
-                    if (short_message.StartsWith("http://www."))
-                    {
-                        href = "0D";
-                        rest = short_message.Substring(11);
-                    }
-                    else
-                    if (short_message.StartsWith("https://www."))
-                    {
-                        href = "0F";
-                        rest = short_message.Substring(12);
-                    }
-                    else
-                    if (short_message.StartsWith("http://"))
-                    {
-                        href = "0C";
-                        rest = short_message.Substring(7);
-                    }
-                    else
-                    if (short_message.StartsWith("https://"))
-                    {
-                        href = "0E";
-                        rest = short_message.Substring(8);
-                    }
-                    else
-                    if (href == "")
-                    {
-                        href = "0C";
-                        rest = short_message;
-                    }
-                    //0605040B8423F05F0601AE02056A0045C60C037761702E6A6F622E616D00070103505050000101
-                    wap.AppendFormat("0605040B8423F05F0601AE02056A0045C6{0}03{1}00070103{2}000101", href, Common.StringToHex(rest), Common.StringToHex(""));
-                    short_message = wap.ToString();
-                }
-            }
-
-
+            var part = MessageBodyCodec.Encode(short_message, data_coding, 2,
+                Common.ASCII_MESSAGE_SPLIT_BASE, false, 0)[0];
             var response = new StringBuilder();
-
-            response.Append(BuildHeader(Common.CommandId.data_sm, 0, sequence_number));
-
-            var sb = new StringBuilder();
-
-            //sb.Append(Common.StringToHex(service_type) + "00");
-            sb.Append("00");
-            sb.Append(source_addr_ton.ToString("X2"));
-            sb.Append(source_addr_npi.ToString("X2"));
-            sb.Append(Common.StringToHex(source_addr) + "00");
-
-            sb.Append(dest_addr_ton.ToString("X2"));
-            sb.Append(dest_addr_npi.ToString("X2"));
-            sb.Append(Common.StringToHex(destination_address) + "00");
-
-            if (data_coding == 245 || Common.StringToHex(short_message).StartsWith("050003"))
-            {
-                sb.Append("40"); // esm_class
-            }
-            else
-            {
-                sb.Append("00");
-            }
-
-            sb.Append(registered_delivery); // registered_delivery
-            sb.Append(data_coding.ToString("X2")); // data_coding
-
-            if (data_coding == 0 || data_coding == 1)
-            {
-                sb.Append("0424");
-                sb.Append(short_message.Length.ToString("X4"));
-                sb.Append(Common.StringToHex(short_message));
-            }
-            if (data_coding == 8)
-            {
-                var be = new StringBuilder();
-                foreach (char c in short_message)
-                {
-                    be.Append(((int)c).ToString("X4"));
-                }
-                sb.Append("0424");
-                sb.AppendFormat("{0:X4}", short_message.Length * 2);
-                sb.Append(be);
-            }
-
-            if (data_coding == 245)
-            {
-                sb.AppendFormat("0424{0:X4}{1}", short_message.Length / 2, short_message);
-            }
-
-            response.Append(sb);
-
-            int len = response.Length / 2 + 4;
-
-            short_message = len.ToString("X8") + response;
-
-            string[] part_message = new string[1];
-            part_message[0] = short_message;
-            return part_message;
+            response.Append(BuildHeader(Common.CommandId.data_sm, command_status, sequence_number));
+            response.Append(Common.StringToHex(service_type) + "00");
+            response.AppendFormat("{0:X2}{1:X2}{2}00", source_addr_ton, source_addr_npi, Common.StringToHex(source_addr));
+            response.AppendFormat("{0:X2}{1:X2}{2}00", dest_addr_ton, dest_addr_npi, Common.StringToHex(destination_address));
+            response.Append(part.HasUserDataHeader ? "40" : "00");
+            response.Append(registered_delivery);
+            response.Append(data_coding.ToString("X2"));
+            // data_sm has no sm_length; its payload is always a TLV.
+            response.Append(part.Field.Substring(2));
+            return new[] { (response.Length / 2 + 4).ToString("X8") + response };
         }
 
         public override void Decode()
@@ -292,36 +218,13 @@ namespace Smpp.Requests
             registered_delivery = bt[1].ToString();
             data_coding = bt[2];
 
+            tlv.Clear();
             base.LoadTLV(tail);
 
-            //message_payload
-            if (tlv.ContainsKey("0424"))
-            {
-                switch (data_coding)
-                {
-                    // UNICODE
-                    case 8:
-                        short_message = Encoding.BigEndianUnicode.GetString(
-                         Common.ConvertHexStringToByteArray(tlv["0424"].ToString())
-                        );
-                        break;
-                    //ASCII
-                    case 1:
-                    case 0:
-                        short_message = Common.HexToString(tlv["0424"].ToString());
-                        break;
-                    default:
-                        short_message = Common.HexToString(tlv["0424"].ToString());
-                        break;
-                }
-            }
-
-            if (short_message == null)
-            {
-                short_message = String.Empty;
-            }
-
-            //tail = tail.Remove(0, sm_length * 2);
+            multipart_header = "";
+            short_message = tlv.TryGetValue("0424", out var payload)
+                ? MessageBodyCodec.Decode(payload.ToString(), data_coding, esm_class, false, out multipart_header)
+                : string.Empty;
         }
     }
 }

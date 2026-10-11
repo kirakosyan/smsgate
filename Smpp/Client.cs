@@ -9,132 +9,128 @@ namespace Smpp
 {
     public class Client : Connection
     {
-        /// <summary>
-        /// Initializes new object for Client connection
-        /// </summary>
-        /// <param name="channelName">Unique channel name</param>
-        /// <param name="events">Events object</param>
+        private CancellationTokenSource connectCancellation;
+        private Task<bool> connecting;
+
         public Client(string channelName, GateEvents events) : base(channelName, events)
         {
-            if (Gate.Clients.ContainsKey(channelName))
+            lock (Gate.Clients)
             {
-                throw new ArgumentException("Channel with the same name already registered");
+                if (Gate.Clients.ContainsKey(channelName))
+                    throw new ArgumentException("Channel with the same name already registered");
+                Gate.Clients.Add(channelName, this);
             }
-
-            Gate.Clients.Add(channelName, this);
         }
 
-        /// <summary>
-        /// Starts binding with server
-        /// </summary>
-        /// <returns>True if connection was successful, false otherwise</returns>
-        public bool Connect()
-        {
-            // need to check when reconnecting
-            if (tcp_client != null && tcp_client.Connected)
-            {
-                tcp_client.Close();
-            }
+        /// <summary>Opens the transport and sends a bind. connected becomes true only after a successful bind response.</summary>
+        public bool Connect() => ConnectAsync().GetAwaiter().GetResult();
 
-            tcp_client = new TcpClient();
+        /// <summary>Asynchronously opens the transport. Concurrent callers share one cancellable attempt.</summary>
+        public Task<bool> ConnectAsync()
+        {
+            lock (SessionLock)
+            {
+                if (stopped)
+                    return Task.FromResult(false);
+                if (tcp_stream != null)
+                    return Task.FromResult(true);
+                if (connecting != null)
+                    return connecting;
+                if (!direction_in && !direction_out)
+                    throw new InvalidOperationException("At least one connection direction must be enabled.");
+                CancelReconnect();
+                var cancellation = new CancellationTokenSource(timeout);
+                connectCancellation = cancellation;
+                connecting = Task.Run(() => ConnectCoreAsync(cancellation));
+                return connecting;
+            }
+        }
+
+        protected virtual ValueTask ConnectTransportAsync(TcpClient transport, CancellationToken cancellation) =>
+            transport.ConnectAsync(host, port, cancellation);
+
+        protected override void CancelConnectionAttempt() => connectCancellation?.Cancel();
+
+        private async Task<bool> ConnectCoreAsync(CancellationTokenSource cancellation)
+        {
+            var transport = new TcpClient();
+            bool installed = false;
+            bool retry = false;
             try
             {
-                tcp_client.Connect(host, port);
-                tcp_stream = tcp_client.GetStream();
-                Events.LogChannelEvent(channel_name, "Connected to " + host + ":" + port);
-
-                // Start communication
-                Receive();
+                await ConnectTransportAsync(transport, cancellation.Token).ConfigureAwait(false);
+                lock (SessionLock)
+                {
+                    if (stopped || !ReferenceEquals(connectCancellation, cancellation))
+                        return false;
+                    if (cancellation.IsCancellationRequested)
+                    {
+                        retry = true;
+                        return false;
+                    }
+                    BeginSession(transport, false);
+                    installed = true;
+                    Notify(() => Events.LogChannelEvent(channel_name, "Connected to " + host + ":" + port));
+                    int result;
+                    if (direction_in && direction_out)
+                    {
+                        result = SendBind(new BindTransceiver
+                        {
+                            SystemID = system_id, Password = password, SystemType = system_type,
+                            Ton = (Common.TonType)source_ton, Npi = (Common.NpiType)source_npi
+                        }, Common.CommandId.bind_transceiver_resp, "bind_transceiver");
+                    }
+                    else if (direction_out)
+                    {
+                        result = SendBind(new BindTransmitter
+                        {
+                            SystemID = system_id, Password = password, SystemType = system_type,
+                            Ton = (Common.TonType)source_ton, Npi = (Common.NpiType)source_npi
+                        }, Common.CommandId.bind_transmitter_resp, "bind_transmitter");
+                    }
+                    else
+                    {
+                        result = SendBind(new BindReceiver
+                        {
+                            SystemID = system_id, Password = password, SystemType = system_type,
+                            Ton = (Common.TonType)source_ton, Npi = (Common.NpiType)source_npi
+                        }, Common.CommandId.bind_receiver_resp, "bind_receiver");
+                    }
+                    if (result != 0)
+                    {
+                        retry = true;
+                        return false;
+                    }
+                    Receive();
+                    return true;
+                }
             }
-            catch (SocketException)
+            catch (Exception ex) when (ex is SocketException || ex is OperationCanceledException || ex is ObjectDisposedException)
             {
-                Events.LogChannelEvent(channel_name, "Unable to connect to host: " + host + ":" + port);
-
-                ScheduleReconnect();
-
+                lock (SessionLock)
+                {
+                    retry = !stopped;
+                    if (retry)
+                        Notify(() => Events.LogChannelEvent(channel_name, "Unable to connect to host: " + host + ":" + port));
+                }
                 return false;
             }
-
-            enquire_link_timer.Start();
-            timeout_timer.Start();
-
-            if (direction_in && direction_out)
+            finally
             {
-                SendBindTransceiver();
+                if (!installed)
+                    transport.Dispose();
+                lock (SessionLock)
+                {
+                    if (ReferenceEquals(connectCancellation, cancellation))
+                    {
+                        connectCancellation = null;
+                        connecting = null;
+                    }
+                    cancellation.Dispose();
+                    if (retry)
+                        ScheduleReconnect();
+                }
             }
-            if (direction_out && !direction_in)
-            {
-                SendBindTransmitter();
-            }
-            if (direction_in && !direction_out)
-            {
-                SendBindReceiver();
-            }
-
-            return true;
-        }
-
-        private void SendBindTransceiver()
-        {
-            string pdu;
-
-            var bind_transceiver = new BindTransceiver
-            {
-                SystemID = system_id,
-                Password = password,
-                InterfaceVersion = Common.SmppVersionType.Version3_4,
-                SystemType = system_type,
-                Ton = (Common.TonType)source_ton,
-                Npi = (Common.NpiType)source_npi,
-                sequence_number = sequence_number
-            };
-
-            commands_queue.Add(sequence_number, DateTime.Now);
-
-            pdu = bind_transceiver.Encode();
-            SendPDU(pdu);
-            Events.LogChannelEvent(channel_name, "Sending [bind_transceiver]", debug ? pdu : "");
-        }
-
-        private void SendBindTransmitter()
-        {
-            string pdu;
-            var bind_transmitter = new BindTransmitter
-            {
-                SystemID = system_id,
-                Password = password,
-                InterfaceVersion = Common.SmppVersionType.Version3_4,
-                SystemType = system_type,
-                Ton = (Common.TonType)source_ton,
-                Npi = (Common.NpiType)source_npi,
-                sequence_number = sequence_number
-            };
-
-            commands_queue.Add(sequence_number, DateTime.Now);
-
-            pdu = bind_transmitter.Encode();
-            SendPDU(pdu);
-            Events.LogChannelEvent(channel_name, "Sending [bind_transmitter]", debug ? pdu : "");
-        }
-
-        private void SendBindReceiver()
-        {
-            var bind_receiver = new BindReceiver
-            {
-                SystemID = system_id,
-                Password = password,
-                InterfaceVersion = Common.SmppVersionType.Version3_4,
-                SystemType = system_type,
-                Ton = (Common.TonType)source_ton,
-                Npi = (Common.NpiType)source_npi,
-                sequence_number = sequence_number
-            };
-
-            commands_queue.Add(sequence_number, DateTime.Now);
-
-            string pdu = bind_receiver.Encode();
-            SendPDU(pdu);
-            Events.LogChannelEvent(channel_name, "Sending [bind_receiver]", debug ? pdu : "");
         }
     }
 }

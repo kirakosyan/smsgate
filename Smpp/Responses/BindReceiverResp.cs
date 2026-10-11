@@ -31,7 +31,7 @@ namespace Smpp.Responses
             var response = new StringBuilder();
             int len = 0;
 
-            response.Append(BuildHeader(Common.CommandId.bind_receiver_resp, 0, sequence_number));
+            response.Append(BuildHeader(Common.CommandId.bind_receiver_resp, command_status, sequence_number));
             response.Append("00");
 
             len = response.Length / 2 + 4;
