@@ -61,7 +61,7 @@ namespace Smpp.Tests
             finally { connection.Quit(); }
         }
 
-        private sealed class ClientPeer : IDisposable
+        internal sealed class ClientPeer : IDisposable
         {
             internal readonly TcpListener Listener = new TcpListener(IPAddress.Loopback, 0);
             internal readonly Client Client;
@@ -205,8 +205,9 @@ namespace Smpp.Tests
             Assert.That(peer.Client.SubmitSm(42, "1", "2", "needs ACK"), Is.Zero);
             ReadPdu(peer.Peer.GetStream());
             WaitUntil(() => statuses.Contains(Common.MessageStatus.timeout), "Missing submit_sm_resp must time out");
-            peer.Accept();
-            peer.BindSuccessfully();
+            Assert.That(peer.Client.connected, Is.True, "One late ACK must not tear down a healthy connection");
+            WritePdu(peer.Peer.GetStream(), "0000001000000015000000000000002A");
+            Assert.That(ReadPdu(peer.Peer.GetStream()), Is.EqualTo("0000001080000015000000000000002A"));
         }
 
         [Test]
@@ -237,7 +238,7 @@ namespace Smpp.Tests
             }
             Assert.That(Task.WhenAll(senders).Wait(TimeSpan.FromSeconds(4)), Is.True);
             Assert.That(senders.Select(task => task.Result), Is.All.Zero);
-            WaitUntil(() => statuses.Count(value => value.Item2 == Common.MessageStatus.sent) == 24, "Every segment should be acknowledged");
+            WaitUntil(() => statuses.Count(value => value.Item2 == Common.MessageStatus.sent) == 8, "Each message completes after all its segments are acknowledged");
             Assert.That(statuses.Any(value => value.Item2 == Common.MessageStatus.timeout), Is.False);
             foreach (int id in Enumerable.Range(1, 8))
                 Assert.That(statuses.Where(value => value.Item1 == id).Last().Item2, Is.EqualTo(Common.MessageStatus.sent));

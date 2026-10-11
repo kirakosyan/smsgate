@@ -118,9 +118,9 @@ Server.Stop();
 
 ### Client
 
-Create a client with `Gate.AddClientConnection(...)` and then call `Connect()`. A true return value means the TCP connection opened and the bind request was sent. Wait for `connected == true` before submitting messages; it becomes true only after the matching successful bind response.
+Create a client with `Gate.AddClientConnection(...)` and then call `Connect()` or await `ConnectAsync()`. A true return value means the TCP connection opened and the bind request was sent. Wait for `connected == true` before submitting messages; it becomes true only after the matching successful bind response. Concurrent connect calls share one attempt. Connection attempts run outside the session lock, and `Quit()` cancels an in-progress attempt.
 
-EOF, socket errors, rejected binds, and unanswered requests trigger a reconnect after `reconnectDelay`. Only one retry is scheduled per connection. `Quit()` cancels retries, closes the session, and unregisters the client permanently.
+EOF, socket errors, rejected binds, invalid frame lengths, and unanswered bind or keepalive requests trigger a reconnect after `reconnectDelay`. Only one retry is scheduled per connection. A late message acknowledgement expires that submission without disconnecting or timing out other messages. `Quit()` cancels retries, closes the session, and unregisters the client permanently.
 
 Binding mode is selected from these flags before calling `Connect()`:
 
@@ -134,7 +134,7 @@ Create one or more logical server channels with `Gate.AddServerConnection(...)`,
 
 Each registered server channel acts as an allowed credential pair. During bind, the listener authenticates the inbound `system_id` and `password` against the configured server channels and routes the accepted session to the matching server object. Remote unbind, EOF, and timeout close the session while preserving its credential registration for a later bind. Explicit `Quit()` or `Server.Stop()` unregisters it.
 
-`StartAsync` starts the listener before returning; startup errors are thrown to the caller. A second start while running is rejected. Each channel accepts one active session at a time, and a concurrent bind is rejected without replacing the existing socket.
+`StartAsync` starts the listener before returning; startup errors are thrown to the caller. A second start while running is rejected. Each channel accepts one active session at a time, and a concurrent bind is rejected without replacing the existing socket. Transient accept errors retry with a short backoff. Unauthenticated binds use asynchronous reads with one ten-second deadline for the whole handshake; `Stop()` cancels pending handshakes.
 
 ## Sending Messages
 
@@ -155,7 +155,7 @@ Return codes:
 - `0` - accepted for sending
 - `1` - no active connection
 - `2` - throttled by the configured send limit
-- `3` - duplicate sequence number
+- `3` - sequence reservation failed (occupied ranges are normally skipped automatically)
 - `502` - transport write failed
 
 For server-originated traffic:
@@ -175,7 +175,9 @@ The library maps these body format names internally:
 
 For `submit_sm` and `deliver_sm`, `large_message` selects multipart (1), a `message_payload` TLV (2), truncation (3), or an exception when the single-message limit is exceeded (4). Single-message limits are 160 ASCII characters, 70 UTF-16 code units, or 140 Latin/binary octets. Multipart bodies use up to 153 ASCII characters, 63 UTF-16 code units, or 134 Latin/binary octets per segment. Surrogate pairs stay together. More than 255 segments or a payload larger than 65,535 octets is rejected before sending. `data_sm` always uses a payload TLV.
 
-Multipart reassembly separates sender, recipient, format, and command type as well as the reference number. Duplicate segments do not count twice; incomplete assemblies expire after five minutes. Reusing the same reference for overlapping messages with identical addressing and format remains ambiguous on the wire.
+Long WAP Push bodies must use payload mode (`large_message = 2`); multipart mode rejects them before sending so that the port-addressing UDH remains valid.
+
+Multipart reassembly supports `submit_sm`, `deliver_sm`, and `data_sm` and separates sender, recipient, format, and command type as well as the reference number. Already-acknowledged segments survive transient disconnects and rebinds. Duplicate segments do not count twice; incomplete assemblies expire after five minutes, and explicit `Quit()` clears them. Reusing the same reference for overlapping messages with identical addressing and format remains ambiguous on the wire.
 
 ## Key Configuration Fields
 
@@ -201,6 +203,8 @@ Most tuning is done by assigning public fields on `Client` or `Server` instances
 
 `GateEvents` is the main integration surface for application code.
 
+Connection events are dispatched asynchronously in order per connection, outside the session lock. A handler can call connection methods or wait for another thread to do so without blocking protocol reads or timers. Exceptions from handlers are logged and later events continue. Different connections can invoke the shared event hub concurrently; application handlers should synchronize shared state. Method return does not imply that its event handlers have finished.
+
 | Event | Purpose |
 | --- | --- |
 | `Event` | General informational and error messages |
@@ -209,7 +213,9 @@ Most tuning is done by assigning public fields on `Client` or `Server` instances
 | `MessageDeliveryReportEvent` | Delivery reports parsed from inbound `deliver_sm` PDUs |
 | `NewMessageEvent` | Application-facing inbound messages with sender, recipient, body, and format |
 
-A successful message response reports `sent`; every nonzero response status reports `rejected`, including unrecognized vendor errors. Delivery receipts require a valid ID and recognized status. Missing, truncated, or unknown receipt fields are logged instead of being treated as successful delivery.
+Each submission emits its initial waiting/routed status once. A multipart submission reports `sent` only after all segments succeed, using the first segment's SMSC message ID. The first nonzero response reports `rejected`, including unrecognized vendor errors; later successes or missing acknowledgements cannot replace that rejection. Delivery receipts require a valid ID and recognized status. Missing, truncated, or unknown receipt fields are logged instead of being treated as successful delivery.
+
+Complete message requests that cannot be decoded receive an error `generic_nack` with their sequence number. Invalid frame lengths close the stream because its boundaries cannot be recovered. `alert_notification` and `outbind` on an established session receive no response.
 
 Useful message states come from `Common.MessageStatus`, including `submitted_waiting_for_ACK`, `sent`, `delivered_ACK_received`, `queued`, `timeout`, `rejected`, and `message_undeliverable`.
 
@@ -222,6 +228,9 @@ The test suite includes the original command and integration tests plus regressi
 - multipart reference collisions, duplicates, reordering, malformed segment counts, expiration, and 255-part limits
 - all three bind modes, incorrect credentials, unmatched responses, EOF/reset recovery, timeouts, rebinds, and cancelled reconnects
 - concurrent multipart submissions, sequence allocation, send failures, and acknowledgement correlation
+- every response ordering for three-part submissions, reconnects between acknowledged segments, and isolated message timeouts
+- transient accept failures, slow bind deadlines, in-progress connect cancellation, and callbacks that block, throw, or send replies
+- sustained buffered traffic, dense framing allocation limits, malformed-request error replies, and notification commands without responses
 - response error encoding and valid, malformed, Unicode, multipart, and long delivery reports
 
 Run the complete suite in both configurations:

@@ -137,6 +137,7 @@ namespace Smpp.Tests
             Assert.That(receivedMessages, Is.Empty);
 
             client.MessageHandler(pdu.Substring(18));
+            client.DrainNotificationsAsync().GetAwaiter().GetResult();
             Assert.That(receivedMessages, Does.Contain("fragmented message"));
         }
 

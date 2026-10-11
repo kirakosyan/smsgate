@@ -21,6 +21,19 @@ namespace Smpp.Requests
         protected int data_coding;
 
         protected string short_message;
+        private string multipart_header = "";
+
+        public bool isMultipart => multipart_header.Length != 0;
+
+        public Common.MultipartMessage MultipartMessage => new Common.MultipartMessage
+        {
+            reference = Convert.ToInt32(multipart_header.Substring(6, 2), 16),
+            submitted_dt = DateTime.UtcNow, sender = Sender, recipient = Recipient,
+            body_format = BodyFormat, command = Common.CommandId.data_sm,
+            num_of_parts = Convert.ToInt32(multipart_header.Substring(8, 2), 16),
+            part_num = Convert.ToInt32(multipart_header.Substring(10, 2), 16),
+            short_message = short_message
+        };
 
         public string Sender
         {
@@ -205,10 +218,12 @@ namespace Smpp.Requests
             registered_delivery = bt[1].ToString();
             data_coding = bt[2];
 
+            tlv.Clear();
             base.LoadTLV(tail);
 
+            multipart_header = "";
             short_message = tlv.TryGetValue("0424", out var payload)
-                ? MessageBodyCodec.Decode(payload.ToString(), data_coding, esm_class, false, out _)
+                ? MessageBodyCodec.Decode(payload.ToString(), data_coding, esm_class, false, out multipart_header)
                 : string.Empty;
         }
     }

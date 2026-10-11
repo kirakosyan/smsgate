@@ -29,6 +29,8 @@ namespace Smpp
             int split = coding == 8 ? Common.UNICODE_MESSAGE_SPLIT_BASE :
                 coding == 0 || coding == 1 ? asciiSplit : 134;
             bool multipart = body.Length / unit > limit && largeMessageMethod == 1;
+            if (multipart && coding == 245)
+                throw new ArgumentException("Long WAP Push messages require message_payload (large_message = 2).", nameof(body));
             if (body.Length / unit > limit && largeMessageMethod == 4)
                 throw new ArgumentException("Message exceeds the single-message limit.", nameof(body));
             if (body.Length / unit > limit && largeMessageMethod == 3)
@@ -100,7 +102,7 @@ namespace Smpp
             if (coding == 2 || coding == 245)
                 return hex.ToUpperInvariant();
             if (coding == 8)
-                return Encoding.BigEndianUnicode.GetString(Convert.FromHexString(hex));
+                return new UnicodeEncoding(true, false, true).GetString(Convert.FromHexString(hex));
             if (packed && (coding == 0 || coding == 1))
                 return Unpack(hex, multipartHeader.Length > 0 ? 1 : 0);
             return coding == 0 || coding == 1 || coding == 3 ? Common.HexToString(hex) : hex.ToUpperInvariant();

@@ -91,7 +91,8 @@ namespace Smpp.Tests
             var connection = new ProbeConnection(events);
             connection.MessageHandler(Encode("submit", "first")[0] + badHeader);
             connection.MessageHandler(Encode("submit", "next")[0]);
-            Assert.That(messages, Is.EqualTo(new[] { "first", "next" }));
+            Assert.That(messages, Is.EqualTo(new[] { "first" }), "Traffic after the lost boundary must be discarded");
+            Assert.That(connection.Reconnects, Is.EqualTo(1));
             connection.Quit();
         }
 

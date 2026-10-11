@@ -13,7 +13,7 @@ namespace Smpp.Tests
     [TestFixture, NonParallelizable]
     public class ServerSessionRegressionTests
     {
-        private sealed class ServerHost : IDisposable
+        internal sealed class ServerHost : IDisposable
         {
             internal readonly Server Server;
             internal readonly int Port;
@@ -116,7 +116,9 @@ namespace Smpp.Tests
             ReadPdu(first.GetStream());
             WaitUntil(() => statuses.Contains(Common.MessageStatus.timeout), "Unacknowledged server message must expire");
             host.Server.timeout = 3000;
-            using var second = host.Bind(1);
+            Assert.That(host.Server.connected, Is.True);
+            WritePdu(first.GetStream(), "0000001000000015000000000000002C");
+            Assert.That(ReadPdu(first.GetStream()), Is.EqualTo("0000001080000015000000000000002C"));
         }
 
         [TestCase(false)]

@@ -28,6 +28,15 @@ namespace Smpp
             public int message_id;
             public DateTime submitted_time;
             public bool registered_delivery;
+            internal Submission submission;
+        }
+
+        internal sealed class Submission
+        {
+            internal int Remaining;
+            internal uint FirstSequence;
+            internal string ResponseId = "";
+            internal bool Completed;
         }
 
         protected TcpClient tcp_client;
@@ -286,11 +295,53 @@ namespace Smpp
         private uint pendingBindResponse;
         private int sessionGeneration;
         private static readonly TimeSpan MultipartLifetime = TimeSpan.FromMinutes(5);
+        private NetworkStream receivingStream;
+        private bool invalidFraming;
+        private readonly Queue<Action> notifications = new Queue<Action>();
+        private bool dispatchingNotifications;
 
-        private sealed class ReceiveState
+        // Serialize application notifications independently of protocol processing. No callback
+        // executes under SessionLock, and a slow subscriber cannot stall reads or keepalives.
+        protected void Notify(Action notification)
         {
-            internal NetworkStream Stream;
-            internal byte[] Buffer = new byte[8192];
+            lock (SessionLock)
+            {
+                notifications.Enqueue(notification);
+                if (dispatchingNotifications)
+                    return;
+                dispatchingNotifications = true;
+                _ = Task.Run(DispatchNotifications);
+            }
+        }
+
+        private void DispatchNotifications()
+        {
+            while (true)
+            {
+                Action notification;
+                lock (SessionLock)
+                {
+                    if (notifications.Count == 0)
+                    {
+                        dispatchingNotifications = false;
+                        return;
+                    }
+                    notification = notifications.Dequeue();
+                }
+                try { notification(); }
+                catch (Exception ex)
+                {
+                    try { Events.LogEvent(LogEvent.Level.Error, channel_name + " - Application callback failed: " + ex.Message); }
+                    catch (Exception) { } // A failing error subscriber must not stop dispatch.
+                }
+            }
+        }
+
+        internal Task DrainNotificationsAsync()
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Notify(() => completion.SetResult());
+            return completion.Task;
         }
 
         protected void ScheduleReconnect() => ScheduleReconnect(reconnectDelay);
@@ -308,20 +359,20 @@ namespace Smpp
                     try
                     {
                         await Task.Delay(Math.Max(0, delayMilliseconds), cancellation.Token).ConfigureAwait(false);
+                        Client client;
                         lock (SessionLock)
                         {
                             if (stopped || cancellation.IsCancellationRequested ||
                                 !ReferenceEquals(reconnectCancellation, cancellation))
                                 return;
                             reconnectCancellation = null;
-                            Client client;
                             lock (Gate.Clients)
                                 Gate.Clients.TryGetValue(channel_name, out client);
-                            if (ReferenceEquals(client, this))
-                                client.Connect();
-                            else
-                                Events.LogChannelEvent(channel_name, "Reconnect skipped: client is no longer registered");
                         }
+                        if (ReferenceEquals(client, this))
+                            await client.ConnectAsync().ConfigureAwait(false);
+                        else
+                            Notify(() => Events.LogChannelEvent(channel_name, "Reconnect skipped: client is no longer registered"));
                     }
                     catch (OperationCanceledException) { }
                     finally
@@ -340,9 +391,34 @@ namespace Smpp
 
         protected uint NextSequenceNumber()
         {
-            uint value = sequence_number;
+            uint value = FindAvailableSequenceRange(1);
             sequence_number = value >= 0x7FFFFFFF ? 1 : value + 1;
             return value;
+        }
+
+        private uint FindAvailableSequenceRange(int count)
+        {
+            uint candidate = sequence_number;
+            // Each failed range skips at least one occupied sequence, including command IDs.
+            for (int attempt = 0; attempt <= submitted_messages.Count + commands_queue.Count; attempt++)
+            {
+                if (candidate == 0 || (ulong)candidate + (uint)count - 1 > 0x7FFFFFFF)
+                    candidate = 1;
+                bool available = true;
+                for (uint offset = 0; offset < count; offset++)
+                {
+                    uint sequence = candidate + offset;
+                    if (submitted_messages.ContainsKey(sequence) || commands_queue.ContainsKey(sequence))
+                    {
+                        candidate = sequence + 1;
+                        available = false;
+                        break;
+                    }
+                }
+                if (available)
+                    return candidate;
+            }
+            throw new InvalidOperationException("No free SMPP sequence range.");
         }
 
         protected void BeginSession(TcpClient client, bool bound)
@@ -353,6 +429,7 @@ namespace Smpp
             connected = bound;
             pendingBindSequence = null;
             _partial_pdu = "";
+            invalidFraming = false;
             sessionGeneration++;
             enquire_link_timer.Start();
             timeout_timer.Start();
@@ -366,7 +443,7 @@ namespace Smpp
             commands_queue.Add(bind.sequence_number, DateTime.UtcNow);
             string pdu = bind.Encode();
             // Bind bodies contain passwords and must not be included in debug logs.
-            Events.LogChannelEvent(channel_name, "Sending [" + name + "]");
+            Notify(() => Events.LogChannelEvent(channel_name, "Sending [" + name + "]"));
             return SendPDU(pdu);
         }
 
@@ -379,7 +456,7 @@ namespace Smpp
                 var request = new EnquireLink { sequence_number = NextSequenceNumber() };
                 commands_queue.Add(request.sequence_number, DateTime.UtcNow);
                 string pdu = request.Encode();
-                Events.LogChannelEvent(channel_name, "Sending [enquire_link]", debug ? pdu : "");
+                Notify(() => Events.LogChannelEvent(channel_name, "Sending [enquire_link]", debug ? pdu : ""));
                 SendPDU(pdu);
             }
         }
@@ -388,49 +465,45 @@ namespace Smpp
         {
             lock (SessionLock)
             {
-                if (tcp_stream == null || stopped)
+                if (tcp_stream == null || stopped || ReferenceEquals(receivingStream, tcp_stream))
                     return;
-                var state = new ReceiveState { Stream = tcp_stream };
-                try
-                {
-                    state.Stream.BeginRead(state.Buffer, 0, state.Buffer.Length, receiveCallback, state);
-                }
-                catch (Exception ex) when (ex is System.IO.IOException || ex is ObjectDisposedException)
-                {
-                    Events.LogChannelEvent(channel_name, "Receive failed: " + ex.Message);
-                    Disconnect(true);
-                }
+                var stream = tcp_stream;
+                receivingStream = stream;
+                _ = Task.Run(() => ReceiveLoopAsync(stream));
             }
         }
 
-        protected void receiveCallback(IAsyncResult ar)
+        private async Task ReceiveLoopAsync(NetworkStream stream)
         {
-            var state = (ReceiveState)ar.AsyncState;
+            var buffer = new byte[8192];
             try
             {
-                int count = state.Stream.EndRead(ar);
-                lock (SessionLock)
+                while (true)
                 {
-                    // A callback from a closed socket must never touch its replacement session.
-                    if (!ReferenceEquals(tcp_stream, state.Stream))
-                        return;
-                    if (count == 0)
+                    int count = await stream.ReadAsync(buffer).ConfigureAwait(false);
+                    lock (SessionLock)
                     {
-                        Disconnect(true);
-                        return;
+                        // A read from a closed socket must never touch its replacement session.
+                        if (!ReferenceEquals(tcp_stream, stream))
+                            return;
+                        if (count == 0)
+                        {
+                            Disconnect(true);
+                            return;
+                        }
+                        MessageHandler(Common.ConvertByteArrayToHexString(buffer, count));
+                        if (!ReferenceEquals(tcp_stream, stream))
+                            return;
                     }
-                    MessageHandler(Common.ConvertByteArrayToHexString(state.Buffer, count));
-                    if (ReferenceEquals(tcp_stream, state.Stream))
-                        Receive();
                 }
             }
             catch (Exception ex) when (ex is System.IO.IOException || ex is ObjectDisposedException || ex is SocketException)
             {
                 lock (SessionLock)
                 {
-                    if (!ReferenceEquals(tcp_stream, state.Stream))
+                    if (!ReferenceEquals(tcp_stream, stream))
                         return;
-                    Events.LogChannelEvent(channel_name, "Receive failed: " + ex.Message);
+                    Notify(() => Events.LogChannelEvent(channel_name, "Receive failed: " + ex.Message));
                     Disconnect(true);
                 }
             }
@@ -444,12 +517,27 @@ namespace Smpp
                 multipart_messages.RemoveAll(part => now - part.submitted_dt >= MultipartLifetime);
                 if (stopped || tcp_stream == null)
                     return;
-                bool expired = commands_queue.Values.Any(time => (now - time).TotalMilliseconds >= timeout) ||
-                    submitted_messages.Values.Any(message => (now - message.submitted_time).TotalMilliseconds >= timeout);
-                if (expired)
+                if (commands_queue.Values.Any(time => (now - time).TotalMilliseconds >= timeout))
                 {
-                    Events.LogChannelEvent(channel_name, "Command timeout");
+                    Notify(() => Events.LogChannelEvent(channel_name, "Command timeout"));
                     Disconnect(true);
+                    return;
+                }
+                var expired = submitted_messages.Values
+                    .Where(message => (now - message.submitted_time).TotalMilliseconds >= timeout)
+                    .Select(message => message.submission).Distinct().ToArray();
+                foreach (var submission in expired)
+                {
+                    var sequences = submitted_messages.Where(pair => ReferenceEquals(pair.Value.submission, submission))
+                        .Select(pair => pair.Key).ToArray();
+                    int id = submitted_messages[sequences[0]].message_id;
+                    foreach (uint sequence in sequences)
+                        submitted_messages.Remove(sequence);
+                    if (!submission.Completed)
+                    {
+                        submission.Completed = true;
+                        Notify(() => Events.LogMessageChangeStatusEvent(id, Common.MessageStatus.timeout));
+                    }
                 }
                 // The timer remains active after a healthy tick, including while idle.
             }
@@ -472,13 +560,14 @@ namespace Smpp
                 client?.Dispose();
                 commands_queue.Clear();
                 _partial_pdu = "";
-                multipart_messages.Clear();
-                var pending = submitted_messages.Values.Select(message => message.message_id).Distinct().ToArray();
+                // Already-ACKed segments must survive transient disconnects until their lifetime expires.
+                var pending = submitted_messages.Values.Where(message => !message.submission.Completed)
+                    .Select(message => message.message_id).Distinct().ToArray();
                 submitted_messages.Clear();
                 if (reconnect)
                     ScheduleReconnect();
                 foreach (int id in pending)
-                    Events.LogMessageChangeStatusEvent(id, Common.MessageStatus.timeout);
+                    Notify(() => Events.LogMessageChangeStatusEvent(id, Common.MessageStatus.timeout));
             }
         }
 
@@ -498,7 +587,7 @@ namespace Smpp
                 }
                 catch (Exception ex) when (ex is System.IO.IOException || ex is ObjectDisposedException || ex is SocketException)
                 {
-                    Events.LogChannelEvent(channel_name, "Send failed: " + ex.Message);
+                    Notify(() => Events.LogChannelEvent(channel_name, "Send failed: " + ex.Message));
                     Disconnect(true);
                     return 502;
                 }
@@ -509,23 +598,27 @@ namespace Smpp
         {
             lock (SessionLock)
             {
+                if (invalidFraming)
+                    return;
                 var data = new List<string>();
                 _partial_pdu += mess?.ToString();
-                while (_partial_pdu.Length >= 8)
+                int offset = 0;
+                while (_partial_pdu.Length - offset >= 8)
                 {
-                    if (!uint.TryParse(_partial_pdu.Substring(0, 8), System.Globalization.NumberStyles.HexNumber,
+                    if (!uint.TryParse(_partial_pdu.AsSpan(offset, 8), System.Globalization.NumberStyles.HexNumber,
                         System.Globalization.CultureInfo.InvariantCulture, out uint length) ||
                         length < 16 || length > Common.MAX_PDU_LENGTH)
                     {
-                        Events.LogEvent(LogEvent.Level.Error, channel_name + " - Invalid PDU length");
-                        _partial_pdu = "";
+                        Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Invalid PDU length"));
+                        invalidFraming = true;
                         break;
                     }
-                    if (_partial_pdu.Length < length * 2)
+                    if (_partial_pdu.Length - offset < length * 2)
                         break;
-                    data.Add(_partial_pdu.Substring(0, (int)length * 2));
-                    _partial_pdu = _partial_pdu.Substring((int)length * 2);
+                    data.Add(_partial_pdu.Substring(offset, (int)length * 2));
+                    offset += (int)length * 2;
                 }
+                _partial_pdu = invalidFraming ? "" : _partial_pdu.Substring(offset);
 
                 int generation = sessionGeneration;
                 foreach (string pdu in data)
@@ -535,10 +628,20 @@ namespace Smpp
                     try { PduHandler(pdu); }
                     catch (Exception ex)
                     {
-                        // A malformed PDU or application callback must not stop subsequent reads.
-                        Events.LogEvent(LogEvent.Level.Error, channel_name + " - PDU handling failed: " + ex.Message);
+                        // A complete but malformed message still needs an error response.
+                        uint command = Convert.ToUInt32(pdu.Substring(8, 8), 16);
+                        if (command == (uint)Common.CommandId.submit_sm || command == (uint)Common.CommandId.deliver_sm ||
+                            command == (uint)Common.CommandId.data_sm)
+                            SendPDU(new GenericNack
+                            {
+                                sequence_number = Convert.ToUInt32(pdu.Substring(24, 8), 16),
+                                command_status = 1 // ESME_RINVMSGLEN
+                            }.Encode());
+                        Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - PDU handling failed: " + ex.Message));
                     }
                 }
+                if (invalidFraming && generation == sessionGeneration)
+                    Disconnect(true); // TCP has no marker with which to recover a frame boundary.
             }
         }
 
@@ -551,11 +654,11 @@ namespace Smpp
             if (status == 0)
             {
                 connected = true;
-                Events.LogChannelEvent(channel_name, "Bound successfully");
+                Notify(() => Events.LogChannelEvent(channel_name, "Bound successfully"));
             }
             else
             {
-                Events.LogChannelEvent(channel_name, "Bind rejected: " + status);
+                Notify(() => Events.LogChannelEvent(channel_name, "Bind rejected: " + status));
                 Disconnect(true);
             }
         }
@@ -565,8 +668,22 @@ namespace Smpp
             if (!submitted_messages.TryGetValue(sequence, out var message))
                 return;
             submitted_messages.Remove(sequence);
-            Events.LogMessageChangeStatusEvent(message.message_id,
-                status == 0 ? Common.MessageStatus.sent : Common.MessageStatus.rejected, messageId ?? "");
+            var submission = message.submission;
+            submission.Remaining--;
+            if (sequence == submission.FirstSequence)
+                submission.ResponseId = messageId ?? "";
+            if (submission.Completed)
+                return;
+            if (status != 0)
+            {
+                submission.Completed = true;
+                Notify(() => Events.LogMessageChangeStatusEvent(message.message_id, Common.MessageStatus.rejected, messageId ?? ""));
+            }
+            else if (submission.Remaining == 0)
+            {
+                submission.Completed = true;
+                Notify(() => Events.LogMessageChangeStatusEvent(message.message_id, Common.MessageStatus.sent, submission.ResponseId));
+            }
         }
 
         private bool TryAssemble(Common.MultipartMessage part, out string body)
@@ -577,7 +694,7 @@ namespace Smpp
             if (part.num_of_parts < 1 || part.num_of_parts > 255 ||
                 part.part_num < 1 || part.part_num > part.num_of_parts)
             {
-                Events.LogEvent(LogEvent.Level.Error, channel_name + " - Invalid multipart segment number");
+                Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Invalid multipart segment number"));
                 return false;
             }
             bool SameMessage(Common.MultipartMessage value) =>
@@ -587,14 +704,14 @@ namespace Smpp
             var matching = multipart_messages.Where(SameMessage).ToList();
             if (matching.Any(value => value.num_of_parts != part.num_of_parts))
             {
-                Events.LogEvent(LogEvent.Level.Error, channel_name + " - Conflicting multipart segment count");
+                Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Conflicting multipart segment count"));
                 return false;
             }
             var duplicate = matching.FindIndex(value => value.part_num == part.part_num);
             if (duplicate >= 0)
             {
                 if (matching[duplicate].short_message != part.short_message)
-                    Events.LogEvent(LogEvent.Level.Error, channel_name + " - Conflicting multipart duplicate");
+                    Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Conflicting multipart duplicate"));
                 return false;
             }
             multipart_messages.Add(part);
@@ -612,7 +729,7 @@ namespace Smpp
             uint status = uint.Parse(pdu.Substring(16, 8), System.Globalization.NumberStyles.HexNumber);
             uint sequence = uint.Parse(pdu.Substring(24, 8), System.Globalization.NumberStyles.HexNumber);
             string name = Common.command_id.TryGetValue(command, out var knownName) ? knownName : "unknown";
-            Events.LogChannelEvent(channel_name, "Receiving [" + name + "]", debug ? pdu : "");
+            Notify(() => Events.LogChannelEvent(channel_name, "Receiving [" + name + "]", debug ? pdu : ""));
             switch ((Common.CommandId)command)
             {
                 case Common.CommandId.bind_transceiver_resp:
@@ -632,7 +749,7 @@ namespace Smpp
                     if (use8bit)
                         submit.Decode();
                     var submitResponse = new SubmitSmResp { sequence_number = sequence, MessageID = Guid.NewGuid().ToString("n") };
-                    Events.LogChannelEvent(channel_name, "Sending [submit_sm_resp]");
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [submit_sm_resp]"));
                     SendPDU(submitResponse.Encode());
                     if (submit.isMultipart)
                     {
@@ -640,15 +757,15 @@ namespace Smpp
                             break;
                         submit.Body = assembledSubmit;
                     }
-                    Events.LogChannelEvent(channel_name, "Message received from " + submit.Sender + " to " + submit.Recipient);
-                    Events.LogNewMessageEvent(channel_name, submitResponse.MessageID, submit.Sender, submit.Recipient,
-                        submit.Body, submit.BodyFormat, submit.RegisteredDelivery);
+                    Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + submit.Sender + " to " + submit.Recipient));
+                    Notify(() => Events.LogNewMessageEvent(channel_name, submitResponse.MessageID, submit.Sender, submit.Recipient,
+                        submit.Body, submit.BodyFormat, submit.RegisteredDelivery));
                     break;
                 case Common.CommandId.deliver_sm:
                     var deliver = new DeliverSm(pdu) { Is8bit = use8bit };
                     deliver.Decode();
                     var deliverResponse = new DeliverSmResp { sequence_number = sequence, MessageID = Guid.NewGuid().ToString("n") };
-                    Events.LogChannelEvent(channel_name, "Sending [deliver_sm_resp]");
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [deliver_sm_resp]"));
                     SendPDU(deliverResponse.Encode());
                     if (deliver.isMultipart)
                     {
@@ -661,18 +778,24 @@ namespace Smpp
                         ReportDelivery(deliver);
                         break;
                     }
-                    Events.LogChannelEvent(channel_name, "Message received from " + deliver.Sender + " to " + deliver.Recipient);
-                    Events.LogNewMessageEvent(channel_name, deliverResponse.MessageID, deliver.Sender, deliver.Recipient,
-                        deliver.Body, deliver.BodyFormat, deliver.RegisteredDelivery);
+                    Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + deliver.Sender + " to " + deliver.Recipient));
+                    Notify(() => Events.LogNewMessageEvent(channel_name, deliverResponse.MessageID, deliver.Sender, deliver.Recipient,
+                        deliver.Body, deliver.BodyFormat, deliver.RegisteredDelivery));
                     break;
                 case Common.CommandId.data_sm:
                     var data = new DataSm(pdu);
                     var dataResponse = new DataSmResp { sequence_number = sequence, MessageID = Guid.NewGuid().ToString("n") };
-                    Events.LogChannelEvent(channel_name, "Sending [data_sm_resp]");
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [data_sm_resp]"));
                     SendPDU(dataResponse.Encode());
-                    Events.LogChannelEvent(channel_name, "Message received from " + data.Sender + " to " + data.Recipient);
-                    Events.LogNewMessageEvent(channel_name, dataResponse.MessageID, data.Sender, data.Recipient,
-                        data.Body, data.BodyFormat, data.RegisteredDelivery);
+                    if (data.isMultipart)
+                    {
+                        if (!TryAssemble(data.MultipartMessage, out var assembledData))
+                            break;
+                        data.Body = assembledData;
+                    }
+                    Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + data.Sender + " to " + data.Recipient));
+                    Notify(() => Events.LogNewMessageEvent(channel_name, dataResponse.MessageID, data.Sender, data.Recipient,
+                        data.Body, data.BodyFormat, data.RegisteredDelivery));
                     break;
                 case Common.CommandId.submit_sm_resp:
                     CompleteSubmission(sequence, status, new SubmitSmResp(pdu).MessageID);
@@ -685,7 +808,7 @@ namespace Smpp
                     break;
                 case Common.CommandId.enquire_link:
                     var response = new EnquireLinkResp { sequence_number = sequence };
-                    Events.LogChannelEvent(channel_name, "Sending [enquire_link_resp]");
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [enquire_link_resp]"));
                     SendPDU(response.Encode());
                     break;
                 case Common.CommandId.enquire_link_resp:
@@ -693,11 +816,13 @@ namespace Smpp
                     break;
                 case Common.CommandId.unbind:
                     SendPDU(new UnbindResp { sequence_number = sequence }.Encode());
-                    Events.LogChannelEvent(channel_name, "Sending [unbind_resp]");
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [unbind_resp]"));
                     Disconnect(true);
-                    Events.LogChannelEvent(channel_name, "Disconnected");
+                    Notify(() => Events.LogChannelEvent(channel_name, "Disconnected"));
                     break;
                 case Common.CommandId.unbind_resp:
+                case Common.CommandId.alert_notification:
+                case Common.CommandId.outbind:
                     break;
                 default:
                     // Never acknowledge an unknown request as successful or NACK a response.
@@ -724,11 +849,11 @@ namespace Smpp
             };
             if (status == null || string.IsNullOrWhiteSpace(deliver.Reference))
             {
-                Events.LogEvent(LogEvent.Level.Error, channel_name + " - Delivery report has no valid ID/status");
+                Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Delivery report has no valid ID/status"));
                 return;
             }
-            Events.LogChannelEvent(channel_name, "Message ref: " + deliver.Reference + " " + deliver.DeliveryStatus);
-            Events.LogMessageDeliverReportEvent(deliver.Reference, status.Value);
+            Notify(() => Events.LogChannelEvent(channel_name, "Message ref: " + deliver.Reference + " " + deliver.DeliveryStatus));
+            Notify(() => Events.LogMessageDeliverReportEvent(deliver.Reference, status.Value));
         }
 
         public void SubmitDeliveryReport(string messageId, Common.MessageStatus status)
@@ -759,7 +884,7 @@ namespace Smpp
                 if (report.Body.Length > Common.SINGLE_ASCII_MESSAGE_LENGTH)
                     report.LargeMessageHandleMethod = 2;
                 string pdu = report.EncodeM()[0];
-                Events.LogChannelEvent(channel_name, "Sending [deliver_sm] report", debug ? pdu : "");
+                Notify(() => Events.LogChannelEvent(channel_name, "Sending [deliver_sm] report", debug ? pdu : ""));
                 SendPDU(pdu);
             }
         }
@@ -771,13 +896,15 @@ namespace Smpp
             {
                 stopped = true;
                 CancelReconnect();
+                CancelConnectionAttempt();
                 if (connected)
                 {
                     var unbind = new Unbind { sequence_number = NextSequenceNumber() };
                     SendPDU(unbind.Encode());
-                    Events.LogChannelEvent(channel_name, "Sending [unbind]");
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [unbind]"));
                 }
                 Disconnect(false);
+                multipart_messages.Clear();
                 if (is_server)
                 {
                     lock (Gate.Servers)
@@ -798,8 +925,12 @@ namespace Smpp
             lock (SessionLock)
             {
                 for (int i = 0; i < partCount; i++)
-                    if (submitted_messages.ContainsKey(firstSequenceNumber + (uint)i))
+                    if (submitted_messages.ContainsKey(firstSequenceNumber + (uint)i) || commands_queue.ContainsKey(firstSequenceNumber + (uint)i))
+                    {
+                        sequence_number = firstSequenceNumber + (uint)i + 1;
                         return false;
+                    }
+                message.submission = new Submission { Remaining = partCount, FirstSequence = firstSequenceNumber };
                 for (int i = 0; i < partCount; i++)
                     submitted_messages.Add(firstSequenceNumber + (uint)i, message);
                 sequence_number = firstSequenceNumber + (uint)partCount;
@@ -819,7 +950,7 @@ namespace Smpp
             {
                 if (!connected)
                 {
-                    Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.received_route_failure);
+                    Notify(() => Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.received_route_failure));
                     return 1;
                 }
                 int second = (int)(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond & int.MaxValue);
@@ -830,15 +961,16 @@ namespace Smpp
                 }
                 if (max_threads > 0 && sent_during_last_second >= max_threads)
                 {
-                    Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.queued);
+                    Notify(() => Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.queued));
                     return 2;
                 }
                 multipart_sequence_number = multipart_sequence_number == 255 ? (byte)1 : (byte)(multipart_sequence_number + 1);
                 firstSequence = sequence_number;
                 parts = encode(firstSequence, multipart_sequence_number);
-                if ((ulong)firstSequence + (uint)parts.Length - 1 > 0x7FFFFFFF)
+                uint available = FindAvailableSequenceRange(parts.Length);
+                if (firstSequence != available)
                 {
-                    firstSequence = 1;
+                    firstSequence = available;
                     parts = encode(firstSequence, multipart_sequence_number);
                 }
                 var message = new submitted_message
@@ -847,12 +979,14 @@ namespace Smpp
                 };
                 if (!TryTrackSubmittedMessages(firstSequence, parts.Length, message))
                 {
-                    Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.queued);
+                    Notify(() => Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.queued));
                     return 3;
                 }
                 sent_during_last_second++;
                 generation = sessionGeneration;
-                Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient);
+                Notify(() => Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient));
+                Notify(() => Events.LogMessageChangeStatusEvent(messageId, registered_delivery == 1 && deliveryReport
+                    ? Common.MessageStatus.submitted_waiting_for_ACK : Common.MessageStatus.received_routed));
             }
             for (int i = 0; i < parts.Length; i++)
             {
@@ -861,12 +995,12 @@ namespace Smpp
                     if (!connected || generation != sessionGeneration)
                         return 1;
                     uint sequence = firstSequence + (uint)i;
-                    var message = submitted_messages[sequence];
+                    if (!submitted_messages.TryGetValue(sequence, out var message))
+                        return 1; // This submission expired while waiting to send its next segment.
                     message.submitted_time = DateTime.UtcNow;
                     submitted_messages[sequence] = message;
-                    Events.LogMessageChangeStatusEvent(messageId, registered_delivery == 1 && deliveryReport
-                        ? Common.MessageStatus.submitted_waiting_for_ACK : Common.MessageStatus.received_routed);
-                    Events.LogChannelEvent(channel_name, "Sending [" + commandName + "]", debug ? parts[i] : "");
+                    string pdu = parts[i];
+                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [" + commandName + "]", debug ? pdu : ""));
                     int result = SendPDU(parts[i]);
                     if (result != 0)
                         return result;
@@ -876,6 +1010,8 @@ namespace Smpp
             }
             return 0;
         }
+
+        protected virtual void CancelConnectionAttempt() { }
 
         public virtual int SubmitSm(int message_id, string sender, string recipient, string body,
             string body_format = "ascii", bool delivery_report = true)

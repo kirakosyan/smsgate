@@ -93,16 +93,38 @@ namespace Smpp.Tests
             internal bool TimerEnabled => timeout_timer.Enabled;
             internal void SetNextSequence(uint sequence) { lock (SessionLock) sequence_number = sequence; }
             internal void Attach(TcpClient client) { lock (SessionLock) BeginSession(client, true); }
+            internal void Drop() { Disconnect(true); Drain(); }
+            internal void Drain() => DrainNotificationsAsync().WaitAsync(TimeSpan.FromSeconds(4)).GetAwaiter().GetResult();
+            // Deterministically observe asynchronous notifications in parser-only tests.
+            public new void MessageHandler(object message) { base.MessageHandler(message); Drain(); }
+            public new void SubmitDeliveryReport(string id, Common.MessageStatus status) { base.SubmitDeliveryReport(id, status); Drain(); }
+            public new void Quit() { base.Quit(); Drain(); }
             internal void Track(uint sequence, int id, DateTime submitted)
             {
                 TryTrackSubmittedMessages(sequence, 1, new submitted_message { message_id = id, submitted_time = submitted });
             }
+            internal void TrackParts(uint sequence, int count, int id, DateTime submitted) =>
+                TryTrackSubmittedMessages(sequence, count, new submitted_message { message_id = id, submitted_time = submitted });
+            internal void AgeSubmission(uint sequence)
+            {
+                lock (SessionLock)
+                {
+                    var message = submitted_messages[sequence];
+                    message.submitted_time = DateTime.UtcNow.AddMinutes(-10);
+                    submitted_messages[sequence] = message;
+                }
+            }
+            internal bool SessionLockHeld => Monitor.IsEntered(SessionLock);
             internal void Queue(uint sequence, DateTime submitted)
             {
                 lock (SessionLock) commands_queue.Add(sequence, submitted);
             }
-            internal void Tick() => typeof(Connection).GetMethod("timeout_timer_Elapsed", BindingFlags.Instance | BindingFlags.NonPublic)
-                .Invoke(this, new object[] { null, null });
+            internal void Tick()
+            {
+                typeof(Connection).GetMethod("timeout_timer_Elapsed", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(this, new object[] { null, null });
+                Drain();
+            }
             internal void AgeMultipart()
             {
                 for (int i = 0; i < multipart_messages.Count; i++)

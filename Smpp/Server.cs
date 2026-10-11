@@ -2,6 +2,7 @@
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 using Smpp.Events;
 using Smpp.Requests;
@@ -13,6 +14,7 @@ namespace Smpp
     {
         private static readonly object ListenerLock = new object();
         private static TcpListener tcp_server;
+        private static CancellationTokenSource listenerCancellation;
         public static volatile bool running;
 
         public Server(string channelName, GateEvents events) : base(channelName, events)
@@ -66,43 +68,70 @@ namespace Smpp
                 listener.Start();
                 tcp_server = listener;
                 running = true;
-                _ = AcceptConnections(listener);
+                listenerCancellation = new CancellationTokenSource();
+                _ = AcceptConnections(listener, listenerCancellation.Token);
             }
         }
 
-        private static async Task AcceptConnections(TcpListener listener)
-        {
-            try
-            {
-                while (true)
+        private static Task AcceptConnections(TcpListener listener, CancellationToken cancellation) =>
+            RunAcceptLoop(listener.AcceptTcpClientAsync,
+                client => { _ = CreateConnection(listener, client, cancellation); },
+                ex =>
                 {
-                    var client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
-                    _ = Task.Run(() => CreateConnection(listener, client));
+                    Server[] servers;
+                    lock (Gate.Servers)
+                        servers = Gate.Servers.Values.ToArray();
+                    foreach (var server in servers)
+                        server.Notify(() => server.Events.LogChannelEvent(server.channel_name, "Accept failed; retrying: " + ex.Message));
+                }, cancellation);
+
+        internal static async Task RunAcceptLoop(Func<CancellationToken, ValueTask<TcpClient>> accept,
+            Action<TcpClient> accepted, Action<SocketException> failed, CancellationToken cancellation)
+        {
+            while (!cancellation.IsCancellationRequested)
+            {
+                try
+                {
+                    var client = await accept(cancellation).ConfigureAwait(false);
+                    if (cancellation.IsCancellationRequested)
+                    {
+                        client.Dispose();
+                        return;
+                    }
+                    accepted(client);
                 }
+                catch (SocketException ex)
+                {
+                    if (cancellation.IsCancellationRequested)
+                        return;
+                    failed(ex);
+                    // Resource exhaustion must not turn retries into a busy loop.
+                    try { await Task.Delay(100, cancellation).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { return; }
+                }
+                catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return; }
+                catch (ObjectDisposedException) { return; }
             }
-            catch (SocketException) { } // Stop interrupts the pending accept.
-            catch (ObjectDisposedException) { }
         }
 
-        private static void CreateConnection(TcpListener listener, TcpClient client)
+        internal static async Task CreateConnection(TcpListener listener, TcpClient client,
+            CancellationToken cancellation, int bindTimeoutMilliseconds = 10000)
         {
             bool accepted = false;
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            deadline.CancelAfter(bindTimeoutMilliseconds);
             try
             {
-                client.ReceiveTimeout = 10000;
                 var stream = client.GetStream();
-                stream.ReadTimeout = 10000;
                 stream.WriteTimeout = 10000;
                 var header = new byte[4];
-                if (!ReadExact(stream, header, 0, header.Length))
-                    return;
-                int length = int.Parse(Common.ConvertByteArrayToHexString(header), System.Globalization.NumberStyles.HexNumber);
+                await stream.ReadExactlyAsync(header, deadline.Token).ConfigureAwait(false);
+                uint length = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(header);
                 if (length < 16 || length > Common.MAX_BIND_PDU_LENGTH)
                     return;
                 var bytes = new byte[length];
                 Buffer.BlockCopy(header, 0, bytes, 0, header.Length);
-                if (!ReadExact(stream, bytes, header.Length, length - header.Length))
-                    return;
+                await stream.ReadExactlyAsync(bytes.AsMemory(header.Length), deadline.Token).ConfigureAwait(false);
                 string pdu = Common.ConvertByteArrayToHexString(bytes);
                 var command = (Common.CommandId)uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber);
                 string login;
@@ -138,18 +167,19 @@ namespace Smpp
                 {
                     if (!running || !ReferenceEquals(tcp_server, listener))
                         return;
-                    if (server == null)
-                    {
-                        response.command_status = 13; // ESME_RBINDFAIL
-                        stream.Write(Common.ConvertHexStringToByteArray(response.Encode()));
-                        return;
-                    }
                 }
+                if (server == null)
+                {
+                    response.command_status = 13; // ESME_RBINDFAIL
+                    await stream.WriteAsync(Common.ConvertHexStringToByteArray(response.Encode()), deadline.Token).ConfigureAwait(false);
+                    return;
+                }
+                deadline.Token.ThrowIfCancellationRequested();
                 accepted = server.AcceptSession(client, response, command);
             }
             catch (Exception ex) when (ex is System.IO.IOException || ex is SocketException ||
                 ex is ArgumentException || ex is FormatException || ex is IndexOutOfRangeException ||
-                ex is Smpp.Exceptions.CommandLengthException || ex is ObjectDisposedException)
+                ex is Smpp.Exceptions.CommandLengthException || ex is ObjectDisposedException || ex is OperationCanceledException)
             {
                 // Invalid or incomplete bind frames never become registered sessions.
             }
@@ -172,24 +202,12 @@ namespace Smpp
                 }
                 client.GetStream().Write(Common.ConvertHexStringToByteArray(response.Encode()));
                 BeginSession(client, true);
-                Events.LogChannelEvent(channel_name, "Received [" + command + "]");
-                Events.LogChannelEvent(channel_name, "Logged in successfully IP: " + client.Client.RemoteEndPoint);
+                string remote = client.Client.RemoteEndPoint.ToString();
+                Notify(() => Events.LogChannelEvent(channel_name, "Received [" + command + "]"));
+                Notify(() => Events.LogChannelEvent(channel_name, "Logged in successfully IP: " + remote));
                 Receive();
                 return true;
             }
-        }
-
-        private static bool ReadExact(NetworkStream stream, byte[] buffer, int offset, int count)
-        {
-            while (count > 0)
-            {
-                int read = stream.Read(buffer, offset, count);
-                if (read == 0)
-                    return false;
-                offset += read;
-                count -= read;
-            }
-            return true;
         }
 
         public static bool Stop()
@@ -197,6 +215,9 @@ namespace Smpp
             lock (ListenerLock)
             {
                 running = false;
+                listenerCancellation?.Cancel();
+                listenerCancellation?.Dispose();
+                listenerCancellation = null;
                 tcp_server?.Stop();
                 tcp_server = null;
             }

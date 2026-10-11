@@ -23,6 +23,14 @@ namespace Smpp.Tests
 
         private int totalMessages = 0;
 
+        [TearDown]
+        public void Cleanup()
+        {
+            foreach (var client in new List<Client>(Gate.Clients.Values))
+                client.Quit();
+            Server.Stop();
+        }
+
         [Test]
         public void SendSimpleSmsTest()
         {
@@ -108,6 +116,8 @@ namespace Smpp.Tests
 
             client.Quit();
             client2.Quit();
+            client.DrainNotificationsAsync().GetAwaiter().GetResult();
+            client2.DrainNotificationsAsync().GetAwaiter().GetResult();
 
             List<string> logSnapshot;
             List<string> messagesSnapshot;
