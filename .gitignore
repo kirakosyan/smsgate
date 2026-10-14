@@ -8,3 +8,7 @@
 /Smpp.Tests/bin
 /.vs
 /packages
+/artifacts
+/TestResults
+/examples/**/bin
+/examples/**/obj
