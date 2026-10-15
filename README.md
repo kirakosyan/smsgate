@@ -1,6 +1,20 @@
-# SMSGate
+# SMSGate - SMPP client and server for .NET
 
-SMSGate is a lightweight SMPP client and server library for .NET. The solution currently targets `net10.0` and exposes a small event-driven API for establishing SMPP sessions, exchanging messages, sending delivery reports, and testing SMPP flows locally.
+[![CI](https://github.com/kirakosyan/smsgate/actions/workflows/ci.yml/badge.svg)](https://github.com/kirakosyan/smsgate/actions/workflows/ci.yml)
+[![NuGet](https://img.shields.io/nuget/v/SMSGate.svg)](https://www.nuget.org/packages/SMSGate)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/kirakosyan/smsgate/blob/master/LICENSE)
+
+SMSGate is a lightweight, dependency-free SMPP 3.4 client and server library for **.NET 10**. Use its event-driven API to send and receive SMS, process delivery receipts, handle multipart messages, and test SMPP sessions locally.
+
+## Install
+
+```bash
+dotnet add package SMSGate --version 1.0.0
+```
+
+The NuGet package is named `SMSGate`. The assembly and namespaces remain `Smpp`, so application code uses `using Smpp;` and `using Smpp.Events;`. This release targets `net10.0`; it does not target .NET Framework or earlier .NET versions.
+
+See the [changelog](https://github.com/kirakosyan/smsgate/blob/master/CHANGELOG.md) for release details and the [local exchange example](https://github.com/kirakosyan/smsgate/tree/master/examples/LocalExchange) for a complete runnable client/server exchange with Unicode messages and a delivery receipt.
 
 ## Overview
 
@@ -23,10 +37,13 @@ Out of the box, the implementation supports:
 
 - `Smpp/` - the SMPP library
 - `Smpp.Tests/` - NUnit-based command and integration tests
+- `examples/LocalExchange/` - a runnable example that consumes the NuGet package
 
 ## Requirements
 
-- .NET 10 SDK
+- .NET 10 SDK matching [global.json](https://github.com/kirakosyan/smsgate/blob/master/global.json) for development
+
+Applications consuming the package require .NET 10. Building and running the test suite needs no SMS provider account or external service: integration tests use local TCP listeners. Run test configurations sequentially and keep loopback port 2775 free.
 
 The project files in this repository target `net10.0`. Build artifacts for other frameworks may exist in `bin/` or `obj/`, but they are not the source-of-truth targets.
 
@@ -250,10 +267,28 @@ The implementation is usable, but there are several behaviors worth knowing befo
 
 ## Development Notes
 
-This repository is currently a source-first library rather than a packaged SDK. If you plan to extend it, the fastest feedback loop is:
+The fastest feedback loop when extending the library is:
 
 ```bash
 dotnet test SMSGate.sln -warnaserror
 ```
 
 That exercises both the command-level tests and the smoke/integration scenarios shipped with the solution.
+
+To build the NuGet package and verify the example against it locally:
+
+```bash
+dotnet pack Smpp/Smpp.csproj --configuration Release -warnaserror --output artifacts
+dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifacts" -warnaserror
+dotnet run --project examples/LocalExchange/LocalExchange.csproj --configuration Release --no-restore
+```
+
+The package includes this README, the MIT license, release notes, XML API documentation, and a companion symbols package with Source Link. GitHub Actions validates both build configurations and the example before publishing a version tag through NuGet Trusted Publishing. Maintainers can follow the [release guide](https://github.com/kirakosyan/smsgate/blob/master/docs/RELEASING.md).
+
+## Contributing
+
+Issues and pull requests are welcome. Include a reproducible example for protocol or session bugs, keep changes compatible with the documented API, and run the Debug and Release suites before submitting a change. Existing tests cover wire encoding, session recovery, and local client/server exchanges; add focused coverage when changing those behaviors.
+
+## License
+
+SMSGate is distributed under the [MIT license](https://github.com/kirakosyan/smsgate/blob/master/LICENSE).
