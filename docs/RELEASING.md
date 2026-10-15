@@ -21,7 +21,15 @@ The NuGet package is `SMSGate`; the assembly and namespaces are `Smpp`. Versions
 
 ## Publish with GitHub Actions
 
-Create a NuGet.org API key scoped to publishing `SMSGate` (including creation of the first version), and add it as the GitHub repository Actions secret `NUGET_API_KEY`. Never commit a key or paste it into an issue. A cloud environment's proxy-backed secret is separate from a GitHub Actions repository secret; configure each through its secure settings.
+GitHub Actions uses [NuGet Trusted Publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing) to obtain a short-lived publishing credential. No stored `NUGET_API_KEY` is required.
+
+Configure these matching settings before the first release:
+
+1. In the repository's **Settings > Environments**, create `nuget`. Allow deployment from tags matching `v*` only, and add the environment variable `NUGET_USER` with value `kirakosyan`.
+2. In the NuGet.org account's **Trusted Publishing** settings, create `smsgate-github-release` with package owner `kirakosyan`, provider **GitHub Actions**, repository owner `kirakosyan`, repository `smsgate`, workflow file `release.yml`, and environment `nuget`. Enter only the workflow filename, without `.github/workflows/`.
+3. Allow **Push new packages and package versions** with the exact package pattern `SMSGate`, including creation of the first version. Leave unlist/relist permission disabled.
+
+The GitHub environment and NuGet policy must use the same environment and workflow names. Other packages and workflows are outside this policy's scope.
 
 After the release commit is on the repository's default branch and validation passes:
 
@@ -30,11 +38,13 @@ git tag -a v1.0.0 -m "SMSGate 1.0.0"
 git push origin v1.0.0
 ```
 
-The release workflow checks that the tag matches the package version, runs Debug and Release tests and the package example, uploads build artifacts, pushes the package and accompanying symbols to NuGet.org, and creates a GitHub release. It supports retrying a tag through **Run workflow**; duplicate NuGet versions are skipped. Do not move an existing release tag to different source.
+The validation job requires the tagged commit to be on `master` and the tag to match the package version. It runs Debug and Release tests and the package example, then uploads the packages. Only after validation succeeds does a separate job enter the `nuget` environment, download that exact artifact by ID, request a temporary credential through `NuGet/login`, push the package and accompanying symbols, and create a GitHub release. Only the publishing job has OIDC token permission. Publishing is serialized across releases.
+
+The workflow supports retrying a tag through **Run workflow**; duplicate NuGet versions are skipped. Select the existing tag when retrying. Branch runs do not publish. Do not move an existing release tag to different source.
 
 ## Publish from a development environment
 
-Use a securely configured `NUGET_API_KEY` scoped to NuGet.org. In Codex cloud, allow `api.nuget.org` and `www.nuget.org` and bind the proxy secret to those destinations. The actual package and symbol upload endpoints are on `www.nuget.org`.
+Prefer the Trusted Publishing workflow above. A manual CLI push instead requires a separately configured NuGet API key scoped to publishing only `SMSGate`, including new packages for the first version. Store it securely as `NUGET_API_KEY`; never commit or paste the value into an issue or chat. The GitHub Actions OIDC credential is issued only inside the matching workflow and is not a development-environment secret.
 
 ```bash
 dotnet nuget push artifacts/SMSGate.1.0.0.nupkg \

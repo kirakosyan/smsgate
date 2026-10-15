@@ -283,7 +283,7 @@ dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifa
 dotnet run --project examples/LocalExchange/LocalExchange.csproj --configuration Release --no-restore
 ```
 
-The package includes this README, the MIT license, release notes, XML API documentation, and a companion symbols package with Source Link. GitHub Actions validates both build configurations and the example before publishing a version tag. Maintainers can follow the [release guide](https://github.com/kirakosyan/smsgate/blob/master/docs/RELEASING.md).
+The package includes this README, the MIT license, release notes, XML API documentation, and a companion symbols package with Source Link. GitHub Actions validates both build configurations and the example before publishing a version tag through NuGet Trusted Publishing. Maintainers can follow the [release guide](https://github.com/kirakosyan/smsgate/blob/master/docs/RELEASING.md).
 
 ## Contributing
 
