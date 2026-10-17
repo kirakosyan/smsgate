@@ -36,6 +36,20 @@ namespace Smpp
                 removed?.Invoke(value);
             }
         }
+        internal void RemoveWhere(Predicate<T> predicate, Action<T> removed)
+        {
+            var node = order.First;
+            while (node != null)
+            {
+                var next = node.Next;
+                if (predicate(node.Value.Value))
+                {
+                    Remove(node.Value.Key, out var value);
+                    removed?.Invoke(value);
+                }
+                node = next;
+            }
+        }
         internal void Clear(Action<T> removed = null) => Trim(0, DateTime.MinValue, removed);
     }
 }

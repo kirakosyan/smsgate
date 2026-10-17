@@ -113,6 +113,7 @@ namespace Smpp.Tests
                 client.reconnectDelay = 60000;
                 Assert.That(await client.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(5)), Is.False);
                 Assert.That(client.connected, Is.False);
+                Assert.That(client.State, Is.EqualTo(ConnectionState.Reconnecting));
                 Assert.That(server.connected, Is.False);
             }
             finally { client?.Quit(); Server.Stop(); }

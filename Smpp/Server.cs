@@ -33,29 +33,30 @@ namespace Smpp
         public override int SubmitSm(int message_id, string sender, string recipient, string body,
             string body_format = "ascii", bool delivery_report = true)
         {
-            bool deliver = use_deliver_sm;
-            body_format = MessageBodyCodec.SelectFormat(body, body_format);
-            return SendMessage(message_id, sender, recipient, delivery_report, deliver ? "deliver_sm" : "data_sm",
-                (sequence, reference) =>
+            return SendMessage(message_id, sender, recipient, delivery_report, SubmissionCommand, (sequence, reference) =>
+                EncodeSubmission(new OutboundMessage(message_id, sender, recipient, body, body_format, delivery_report), sequence, reference));
+        }
+        protected override string SubmissionCommand => use_deliver_sm ? "deliver_sm" : "data_sm";
+        protected override string[] EncodeSubmission(OutboundMessage message, uint sequence, byte reference)
+        {
+            string format = MessageBodyCodec.SelectFormat(message.Body, message.BodyFormat);
+            if (use_deliver_sm)
+                return new DeliverSm(Events)
                 {
-                    if (deliver)
-                        return new DeliverSm(Events)
-                        {
-                            sequence_number = sequence, MultipartSequenceNumber = reference,
-                            Sender = sender, Recipient = recipient, Body = body, BodyFormat = body_format,
-                            ServiceType = system_type, SourceAddrTON = source_ton, SourceAddrNPI = source_npi,
-                            DestAddrTON = destination_ton, DestAddrNPI = destination_npi,
-                            RegisteredDelivery = registered_delivery == 1 && delivery_report ? 1 : 0,
-                            SplitBaseASCII = split_base_ascii, LargeMessageHandleMethod = large_message, Is8bit = use8bit
-                        }.EncodeM();
-                    return new DataSm
-                    {
-                        sequence_number = sequence, Sender = sender, Recipient = recipient, Body = body,
-                        BodyFormat = body_format, ServiceType = system_type, SourceAddrTON = source_ton,
-                        SourceAddrNPI = source_npi, DestAddrTON = destination_ton, DestAddrNPI = destination_npi,
-                        RegisteredDelivery = registered_delivery == 1 && delivery_report ? 1 : 0
-                    }.EncodeM();
-                });
+                    sequence_number = sequence, MultipartSequenceNumber = reference,
+                    Sender = message.Sender, Recipient = message.Recipient, Body = message.Body, BodyFormat = format,
+                    ServiceType = system_type, SourceAddrTON = source_ton, SourceAddrNPI = source_npi,
+                    DestAddrTON = destination_ton, DestAddrNPI = destination_npi,
+                    RegisteredDelivery = registered_delivery == 1 && message.RequestDeliveryReport ? 1 : 0,
+                    SplitBaseASCII = split_base_ascii, LargeMessageHandleMethod = large_message, Is8bit = use8bit
+                }.EncodeM();
+            return new DataSm
+            {
+                sequence_number = sequence, Sender = message.Sender, Recipient = message.Recipient, Body = message.Body,
+                BodyFormat = format, ServiceType = system_type, SourceAddrTON = source_ton,
+                SourceAddrNPI = source_npi, DestAddrTON = destination_ton, DestAddrNPI = destination_npi,
+                RegisteredDelivery = registered_delivery == 1 && message.RequestDeliveryReport ? 1 : 0
+            }.EncodeM();
         }
 
         /// <summary>Starts the listener before returning, then accepts sessions in the background.</summary>
