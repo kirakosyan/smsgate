@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <SMSGateVersion Condition="'$(SMSGateVersion)' == ''">1.0.0</SMSGateVersion>
+    <SMSGateVersion Condition="'$(SMSGateVersion)' == ''">1.1.0</SMSGateVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="SMSGate" Version="$(SMSGateVersion)" />

@@ -6,23 +6,28 @@
 
 SMSGate is a lightweight, dependency-free SMPP 3.4 client and server library for **.NET 10**. Use its event-driven API to send and receive SMS, process delivery receipts, handle multipart messages, and test SMPP sessions locally.
 
-The development branch also includes opt-in GSM-7 encoding, complete multipart delivery tracking, TLS, and application-controlled acknowledgements. It also provides bounded async submissions, bind results, instance-owned gateways, shared TX/RX tracking, graceful shutdown, and metrics; see the [service integration guide](https://github.com/kirakosyan/smsgate/blob/master/docs/SERVICE_INTEGRATION.md). These additions are not in the published 1.0.0 package. See the [provider integration guide](https://github.com/kirakosyan/smsgate/blob/master/docs/PROVIDER_INTEGRATION.md) and the [runnable TLS example](https://github.com/kirakosyan/smsgate/tree/master/examples/ProviderFeatures).
+SMSGate **1.1.0** adds opt-in GSM-7 encoding, complete multipart delivery tracking, TLS, and application-controlled acknowledgements. The [provider integration guide](https://github.com/kirakosyan/smsgate/blob/v1.1.0/docs/PROVIDER_INTEGRATION.md) and [runnable TLS example](https://github.com/kirakosyan/smsgate/tree/v1.1.0/examples/ProviderFeatures) cover these features. For new services, start with `SmppGateway`, validated client options, and `SubmitAsync` for bounded queues, PDU rate/window limits, explicit bind/submission results, shared TX/RX tracking, graceful shutdown, and metrics; see the [service integration guide](https://github.com/kirakosyan/smsgate/blob/v1.1.0/docs/SERVICE_INTEGRATION.md).
 
 ## Install
 
 ```bash
-dotnet add package SMSGate --version 1.0.0
+dotnet add package SMSGate --version 1.1.0
 ```
 
 The NuGet package is named `SMSGate`. The assembly and namespaces remain `Smpp`, so application code uses `using Smpp;` and `using Smpp.Events;`. This release targets `net10.0`; it does not target .NET Framework or earlier .NET versions.
 
 See the [changelog](https://github.com/kirakosyan/smsgate/blob/master/CHANGELOG.md) for release details and the [local exchange example](https://github.com/kirakosyan/smsgate/tree/master/examples/LocalExchange) for a complete runnable client/server exchange with Unicode messages and a delivery receipt.
 
+### Upgrading from 1.0.0
+
+Existing APIs, event signatures, plain TCP, automatic acknowledgements, and inbound alphabet defaults remain available. Enable `UseGsm7` only when your provider uses the GSM default alphabet for DCS 0. Configure TLS and an `InboundMessageHandler` explicitly when required. Legacy `SubmitSm` bypasses the new queue limits; use `SubmitAsync` consistently when those limits must apply to all submissions. Queues and delivery tracking are held in memory, so keep a durable application outbox and duplicate policy when recovery across process restarts is required.
+
 ## Overview
 
-The library is organized around three main types:
+The library is organized around four main types:
 
-- `Gate` is the entry point used to register connections and share a single `GateEvents` instance.
+- `SmppGateway` owns client connections and provides graceful shutdown for services and dependency injection.
+- `Gate` is the legacy entry point used to register connections and share a single `GateEvents` instance.
 - `Client` opens an outbound SMPP session and binds as receiver, transmitter, or transceiver depending on configuration.
 - `Server` registers accepted credentials and hosts a static TCP listener that authenticates inbound binds.
 
@@ -30,10 +35,12 @@ Out of the box, the implementation supports:
 
 - outbound `submit_sm`
 - server-originated `deliver_sm` or `data_sm`
-- delivery reports via `deliver_sm`
+- text and TLV delivery reports via `deliver_sm` and `data_sm`, with per-part and aggregate tracking
 - multipart and long-message handling
-- ASCII, Latin, Unicode, binary, and WAP Push body formats
-- command-level logging and application callbacks via events
+- ASCII, GSM-7, Latin, Unicode, binary, and WAP Push body formats
+- optional TLS and storage before per-PDU acknowledgement
+- bounded asynchronous submissions, PDU rate/window controls, and explicit outcome uncertainty
+- command-level logging, structured diagnostics, metrics, and application callbacks via events
 
 ## Solution Layout
 

@@ -1,6 +1,6 @@
-# Provider integration (unreleased)
+# Provider integration
 
-These APIs are available from this source branch and are not in the published SMSGate 1.0.0 package. Build with the SDK in `global.json`. The library remains dependency-free and targets .NET 10.
+These APIs are available in SMSGate 1.1.0. Install with `dotnet add package SMSGate --version 1.1.0`; use the SDK in `global.json` when building this repository. The library remains dependency-free and targets .NET 10.
 
 Run the complete loopback example with:
 
