@@ -11,7 +11,14 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       CI: 'true'
@@ -34,11 +41,16 @@ jobs:
         run: dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifacts" -warnaserror
       - name: Verify local SMPP exchange using the package
         run: dotnet run --project examples/LocalExchange/LocalExchange.csproj --configuration Release --no-restore
+      - name: Verify provider features using the package
+        run: |
+          version=$(dotnet msbuild Smpp/Smpp.csproj -getProperty:Version | tr -d '\r')
+          dotnet restore examples/ProviderFeatures/ProviderFeatures.csproj --source "$PWD/artifacts" -p:SMSGateVersion="$version" -warnaserror
+          dotnet run --project examples/ProviderFeatures/ProviderFeatures.csproj --configuration Release --no-restore -p:SMSGateVersion="$version"
       - name: Upload packages and test results
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: packages-and-test-results
+          name: packages-and-test-results-${{ matrix.os }}
           path: |
             artifacts/*.nupkg
             artifacts/*.snupkg

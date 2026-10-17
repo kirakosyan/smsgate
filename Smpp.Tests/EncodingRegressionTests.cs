@@ -128,6 +128,44 @@ namespace Smpp.Tests
             Assert.Throws<ArgumentException>(() => Encode(command, body + "a", mode: 2));
         }
 
+        [TestCase("submit", 1)]
+        [TestCase("deliver", 1)]
+        [TestCase("submit", 2)]
+        [TestCase("deliver", 2)]
+        [TestCase("data", 2)]
+        public void ManualPayloadCannotDuplicateAnEncodedBody(string command, int mode)
+        {
+            Assert.Throws<ArgumentException>(() => EncodeWithManualPayload(command, "inline", mode));
+        }
+
+        [TestCase("submit")]
+        [TestCase("deliver")]
+        public void ManualPayloadWithAnEmptyShortMessageRemainsValid(string command)
+        {
+            string frame = EncodeWithManualPayload(command, "", 1);
+            Assert.That(Convert.FromHexString(frame)[34], Is.Zero);
+            Assert.That(Decode(command, frame).Body, Is.EqualTo("payload"));
+        }
+
+        private static string EncodeWithManualPayload(string command, string body, int mode)
+        {
+            if (command == "submit")
+            {
+                var request = new SubmitSm { Sender = "1", Recipient = "2", Body = body, LargeMessageHandleMethod = mode };
+                request.tlv["0424"] = Common.StringToHex("payload");
+                return request.EncodeM()[0];
+            }
+            if (command == "deliver")
+            {
+                var request = new DeliverSm(new GateEvents()) { Sender = "1", Recipient = "2", Body = body, LargeMessageHandleMethod = mode };
+                request.tlv["0424"] = Common.StringToHex("payload");
+                return request.EncodeM()[0];
+            }
+            var data = new DataSm { Sender = "1", Recipient = "2", Body = body };
+            data.tlv["0424"] = Common.StringToHex("payload");
+            return data.EncodeM()[0];
+        }
+
         [TestCase("submit")]
         [TestCase("deliver")]
         [TestCase("data")]

@@ -17,6 +17,9 @@ namespace Smpp.Requests
 
         protected int esm_class;
 
+        public int ESMClass { get => esm_class; set => esm_class = value; }
+        public bool UseGsm7 { get; set; }
+
         protected string registered_delivery = "00";
         protected int data_coding;
 
@@ -76,6 +79,7 @@ namespace Smpp.Requests
             set
             {
                 data_coding = Common.body_format[value];
+                UseGsm7 = value == "gsm7";
             }
 
             get
@@ -83,6 +87,7 @@ namespace Smpp.Requests
                 switch (data_coding)
                 {
                     case 0:
+                        return UseGsm7 ? "gsm7" : "ascii";
                     case 1:
                         return "ascii";
                     case 2:
@@ -179,17 +184,18 @@ namespace Smpp.Requests
         public string[] EncodeM()
         {
             var part = MessageBodyCodec.Encode(short_message, data_coding, 2,
-                Common.ASCII_MESSAGE_SPLIT_BASE, false, 0)[0];
+                Common.ASCII_MESSAGE_SPLIT_BASE, false, 0, UseGsm7)[0];
             var response = new StringBuilder();
             response.Append(BuildHeader(Common.CommandId.data_sm, command_status, sequence_number));
             response.Append(Common.StringToHex(service_type) + "00");
             response.AppendFormat("{0:X2}{1:X2}{2}00", source_addr_ton, source_addr_npi, Common.StringToHex(source_addr));
             response.AppendFormat("{0:X2}{1:X2}{2}00", dest_addr_ton, dest_addr_npi, Common.StringToHex(destination_address));
-            response.Append(part.HasUserDataHeader ? "40" : "00");
+            response.Append((esm_class | (part.HasUserDataHeader ? 0x40 : 0)).ToString("X2"));
             response.Append(registered_delivery);
             response.Append(data_coding.ToString("X2"));
             // data_sm has no sm_length; its payload is always a TLV.
             response.Append(part.Field.Substring(2));
+            response.Append(EncodeOptionalParameters(true, false));
             return new[] { (response.Length / 2 + 4).ToString("X8") + response };
         }
 
@@ -223,7 +229,7 @@ namespace Smpp.Requests
 
             multipart_header = "";
             short_message = tlv.TryGetValue("0424", out var payload)
-                ? MessageBodyCodec.Decode(payload.ToString(), data_coding, esm_class, false, out multipart_header)
+                ? MessageBodyCodec.Decode(payload.ToString(), data_coding, esm_class, false, out multipart_header, UseGsm7)
                 : string.Empty;
         }
     }

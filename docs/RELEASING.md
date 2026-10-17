@@ -14,9 +14,11 @@ The NuGet package is `SMSGate`; the assembly and namespaces are `Smpp`. Versions
    dotnet pack Smpp/Smpp.csproj --configuration Release --no-build --no-restore -warnaserror --output artifacts
    dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifacts" -warnaserror
    dotnet run --project examples/LocalExchange/LocalExchange.csproj --configuration Release --no-restore
+   dotnet restore examples/ProviderFeatures/ProviderFeatures.csproj --source "$PWD/artifacts" -p:SMSGateVersion=<version> -warnaserror
+   dotnet run --project examples/ProviderFeatures/ProviderFeatures.csproj --configuration Release --no-restore -p:SMSGateVersion=<version>
    ```
 
-3. Confirm that both suites executed tests with no failures, that the example printed `Local SMPP exchange passed.`, and that the `.nupkg` contains `lib/net10.0/Smpp.dll`, XML API documentation, README, license, changelog, and the intended metadata. The `.snupkg` contains portable debug symbols. It must not contain test dependencies or build caches.
+3. Confirm that both suites executed tests with no failures, that the examples printed `Local SMPP exchange passed.` and `Provider features passed:`, and that the `.nupkg` contains `lib/net10.0/Smpp.dll`, XML API documentation, README, license, changelog, and the intended metadata. The `.snupkg` contains portable debug symbols. It must not contain test dependencies or build caches. Substitute the new package version for `<version>` above and use a fresh NuGet package cache when revalidating an already-cached development version.
 4. Commit the release files before the final build. In CI, `CI=true` enables reproducible source paths; the SDK supplies Source Link for GitHub. Confirm that package `repository.commit` matches the release commit. Rebuild if that commit changed.
 
 ## Publish with GitHub Actions

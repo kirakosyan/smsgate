@@ -88,6 +88,8 @@ namespace Smpp.Tests
             internal int Reconnects;
             internal ProbeConnection(GateEvents events = null) : base("probe", events ?? new GateEvents()) { }
             protected override void ScheduleReconnect(int delayMilliseconds) => Interlocked.Increment(ref Reconnects);
+            internal bool FailAcknowledgement;
+            protected override int WriteAcknowledgement(string pdu) => FailAcknowledgement ? 502 : tcp_stream == null ? 0 : base.WriteAcknowledgement(pdu);
             internal int Pending { get { lock (SessionLock) return submitted_messages.Count; } }
             internal int MultipartCount { get { lock (SessionLock) return multipart_messages.Count; } }
             internal bool TimerEnabled => timeout_timer.Enabled;
@@ -105,6 +107,8 @@ namespace Smpp.Tests
             }
             internal void TrackParts(uint sequence, int count, int id, DateTime submitted) =>
                 TryTrackSubmittedMessages(sequence, count, new submitted_message { message_id = id, submitted_time = submitted });
+            internal int SendDeliver(int id) => SendMessage(id, "1", "2", true, "deliver_sm", (sequence, reference) =>
+                new DeliverSm(new GateEvents()) { Sender = "1", Recipient = "2", Body = "hello", BodyFormat = "ascii", sequence_number = sequence }.EncodeM());
             internal void AgeSubmission(uint sequence)
             {
                 lock (SessionLock)
@@ -114,6 +118,7 @@ namespace Smpp.Tests
                     submitted_messages[sequence] = message;
                 }
             }
+            internal void HoldSession(Action action) { lock (SessionLock) action(); }
             internal bool SessionLockHeld => Monitor.IsEntered(SessionLock);
             internal void Queue(uint sequence, DateTime submitted)
             {

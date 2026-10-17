@@ -2,6 +2,14 @@
 {
     public class GateEvents
     {
+        public event System.Action<MessagePartStatus> MessagePartStatusEvent;
+        public event System.Action<DeliveryReceipt> DeliveryReceiptEvent;
+        public event System.Action<MessageDeliveryStatus> MessageDeliveryStatusEvent;
+
+        internal void OnPartStatus(MessagePartStatus status) => MessagePartStatusEvent?.Invoke(status);
+        internal void OnDeliveryReceipt(DeliveryReceipt receipt) => DeliveryReceiptEvent?.Invoke(receipt);
+        internal void OnDeliveryStatus(MessageDeliveryStatus status) => MessageDeliveryStatusEvent?.Invoke(status);
+
         public delegate void LogEventHandler(LogEvent.Level level, string description);
         public event LogEventHandler Event;
 

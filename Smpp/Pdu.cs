@@ -49,7 +49,7 @@ namespace Smpp
         /// </summary>
         protected Pdu()
         {
-            tlv = new SortedList<string, object>();
+            tlv = new SortedList<string, object>(StringComparer.OrdinalIgnoreCase);
             _sequenceNumber = 0;
         }
 
@@ -59,7 +59,7 @@ namespace Smpp
         /// <param name="pdu">The request pdu</param>
         protected Pdu(string pdu)
         {
-            tlv = new SortedList<string, object>();
+            tlv = new SortedList<string, object>(StringComparer.OrdinalIgnoreCase);
 
             _pdu = pdu;
 
@@ -126,6 +126,24 @@ namespace Smpp
         #endregion
 
         #region utility methods
+
+        protected string EncodeOptionalParameters(bool hasPayload, bool hasShortMessage)
+        {
+            var result = new StringBuilder();
+            foreach (var parameter in tlv)
+            {
+                if ((hasPayload || hasShortMessage) && parameter.Key.Equals("0424", StringComparison.OrdinalIgnoreCase))
+                    throw new ArgumentException("message_payload cannot duplicate Body or be combined with short_message.");
+                if (parameter.Key.Length != 4)
+                    throw new ArgumentException("TLV tags must contain four hexadecimal digits.");
+                ushort tag = ushort.Parse(parameter.Key, System.Globalization.NumberStyles.HexNumber);
+                byte[] bytes = Convert.FromHexString(parameter.Value.ToString());
+                if (bytes.Length > ushort.MaxValue)
+                    throw new ArgumentException("TLV values cannot exceed 65,535 octets.");
+                result.Append($"{tag:X4}{bytes.Length:X4}{Convert.ToHexString(bytes)}");
+            }
+            return result.ToString();
+        }
 
         /// <summary>
         /// Builds PDU header

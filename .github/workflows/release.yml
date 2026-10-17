@@ -50,6 +50,12 @@ jobs:
         run: dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifacts" -warnaserror
       - name: Verify local SMPP exchange using the package
         run: dotnet run --project examples/LocalExchange/LocalExchange.csproj --configuration Release --no-restore
+      - name: Verify provider features using the package
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          dotnet restore examples/ProviderFeatures/ProviderFeatures.csproj --source "$PWD/artifacts" -p:SMSGateVersion="$PACKAGE_VERSION" -warnaserror
+          dotnet run --project examples/ProviderFeatures/ProviderFeatures.csproj --configuration Release --no-restore -p:SMSGateVersion="$PACKAGE_VERSION"
       - name: Upload release packages
         id: packages
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

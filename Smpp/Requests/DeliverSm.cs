@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Text;
-using System.Text.RegularExpressions;
+using System.Collections.Generic;
 using Smpp.Events;
 
 namespace Smpp.Requests
@@ -36,6 +36,8 @@ namespace Smpp.Requests
 
         private string delivery_status;
         protected bool is_8bit;
+
+        public bool UseGsm7 { get; set; }
 
         protected int large_message_handle_method = 1;
 
@@ -213,6 +215,7 @@ namespace Smpp.Requests
                 switch (data_coding)
                 {
                     case 0:
+                        return UseGsm7 ? "gsm7" : "ascii";
                     case 1:
                         return "ascii";
                     case 2:
@@ -230,6 +233,7 @@ namespace Smpp.Requests
             set
             {
                 data_coding = Common.body_format[value];
+                UseGsm7 = value == "gsm7";
             }
         }
 
@@ -335,44 +339,30 @@ namespace Smpp.Requests
             LoadTLV(tail);
             if (sm_length == 0 && tlv.TryGetValue("0424", out var payload))
                 messageHex = payload.ToString();
-            short_message = MessageBodyCodec.Decode(messageHex, data_coding, esm_class, is_8bit, out multipart_header);
+            short_message = MessageBodyCodec.Decode(messageHex, data_coding, esm_class, is_8bit, out multipart_header, UseGsm7);
             ParseDeliveryReport();
         }
 
+        internal DeliveryReceipt ParsedReceipt { get; private set; }
+        internal List<string> ReceiptWarnings { get; } = new();
         internal void ParseDeliveryReport()
         {
-            reference_from = "";
-            delivery_status = "";
-            if ((esm_class & 0x3C) == 4)
+            reference_from = delivery_status = "";
+            ParsedReceipt = null;
+            ReceiptWarnings.Clear();
+            if ((esm_class & 0x3C) != 4) return;
+            ParsedReceipt = DeliveryReceiptParser.Parse("", short_message, tlv, ReceiptWarnings.Add);
+            if (ParsedReceipt != null)
             {
-                var id = Regex.Match(short_message, @"(?:^|\s)id:\s*([^\s:]+)(?=\s|$)", RegexOptions.IgnoreCase);
-                if (id.Success)
-                    reference_from = id.Groups[1].Value;
-                var status = Regex.Match(short_message, @"(?:^|\s)stat:\s*([A-Za-z]+)(?=\s|$)", RegexOptions.IgnoreCase);
-                if (status.Success)
-                {
-                    // Accept only complete known values (plus the legacy six-character spellings).
-                    var value = status.Groups[1].Value.ToUpperInvariant();
-                    delivery_status = value switch
-                    {
-                        "DELIVRD" or "DELIVR" => "DELIVR",
-                        "EXPIRED" or "EXPIRE" => "EXPIRE",
-                        "DELETED" or "DELETE" => "DELETE",
-                        "UNDELIV" or "UNDELI" => "UNDELI",
-                        "ACCEPTD" or "ACCEPT" => "ACCEPT",
-                        "UNKNOWN" or "UNKNOW" => "UNKNOW",
-                        "REJECTD" or "REJECT" => "REJECT",
-                        "ENROUTE" or "ENROUT" => "ENROUT",
-                        _ => ""
-                    };
-                }
+                reference_from = ParsedReceipt.ProviderMessageId;
+                delivery_status = DeliveryReceiptParser.StateText(ParsedReceipt.MessageState, legacy: true);
             }
         }
 
         public virtual string[] EncodeM()
         {
             var encoded = MessageBodyCodec.Encode(short_message, data_coding,
-                large_message_handle_method, split_base_ascii, is_8bit, MultipartSequenceNumber);
+                large_message_handle_method, split_base_ascii, is_8bit, MultipartSequenceNumber, UseGsm7);
             var parts = new string[encoded.Length];
             for (int i = 0; i < encoded.Length; i++)
             {
@@ -386,6 +376,7 @@ namespace Smpp.Requests
                 response.Append(registered_delivery);
                 response.AppendFormat("00{0:X2}00", data_coding);
                 response.Append(part.Field);
+                response.Append(EncodeOptionalParameters(large_message_handle_method == 2, part.Field != "00"));
                 parts[i] = (response.Length / 2 + 4).ToString("X8") + response;
             }
             return parts;
