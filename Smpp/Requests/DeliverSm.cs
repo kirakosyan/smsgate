@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Text;
-using System.Text.RegularExpressions;
+using System.Collections.Generic;
 using Smpp.Events;
 
 namespace Smpp.Requests
@@ -343,43 +343,19 @@ namespace Smpp.Requests
             ParseDeliveryReport();
         }
 
+        internal DeliveryReceipt ParsedReceipt { get; private set; }
+        internal List<string> ReceiptWarnings { get; } = new();
         internal void ParseDeliveryReport()
         {
-            reference_from = "";
-            delivery_status = "";
-            if ((esm_class & 0x3C) == 4)
+            reference_from = delivery_status = "";
+            ParsedReceipt = null;
+            ReceiptWarnings.Clear();
+            if ((esm_class & 0x3C) != 4) return;
+            ParsedReceipt = DeliveryReceiptParser.Parse("", short_message, tlv, ReceiptWarnings.Add);
+            if (ParsedReceipt != null)
             {
-                var id = Regex.Match(short_message, @"(?:^|\s)id:\s*([^\s:]+)(?=\s|$)", RegexOptions.IgnoreCase);
-                if (id.Success)
-                    reference_from = id.Groups[1].Value;
-                var status = Regex.Match(short_message, @"(?:^|\s)stat:\s*([A-Za-z]+)(?=\s|$)", RegexOptions.IgnoreCase);
-                if (status.Success)
-                {
-                    // Accept only complete known values (plus the legacy six-character spellings).
-                    var value = status.Groups[1].Value.ToUpperInvariant();
-                    delivery_status = value switch
-                    {
-                        "DELIVRD" or "DELIVR" => "DELIVR",
-                        "EXPIRED" or "EXPIRE" => "EXPIRE",
-                        "DELETED" or "DELETE" => "DELETE",
-                        "UNDELIV" or "UNDELI" => "UNDELI",
-                        "ACCEPTD" or "ACCEPT" => "ACCEPT",
-                        "UNKNOWN" or "UNKNOW" => "UNKNOW",
-                        "REJECTD" or "REJECT" => "REJECT",
-                        "ENROUTE" or "ENROUT" => "ENROUT",
-                        _ => ""
-                    };
-                }
-                var receipt = DeliveryReceiptParser.Parse("", short_message, tlv);
-                if (receipt != null)
-                {
-                    reference_from = receipt.ProviderMessageId;
-                    delivery_status = receipt.MessageState switch
-                    {
-                        1 => "ENROUT", 2 => "DELIVR", 3 => "EXPIRE", 4 => "DELETE",
-                        5 => "UNDELI", 6 => "ACCEPT", 7 => "UNKNOW", 8 => "REJECT", _ => ""
-                    };
-                }
+                reference_from = ParsedReceipt.ProviderMessageId;
+                delivery_status = DeliveryReceiptParser.StateText(ParsedReceipt.MessageState, legacy: true);
             }
         }
 

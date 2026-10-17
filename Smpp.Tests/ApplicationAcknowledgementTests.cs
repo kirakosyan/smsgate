@@ -16,6 +16,60 @@ namespace Smpp.Tests
     {
         private static TaskCompletionSource<T> Completion<T>() => new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public async Task FailedAcknowledgementDoesNotPublishAcceptedMessage(bool controlled)
+        {
+            int received = 0;
+            var events = new GateEvents();
+            events.NewMessageEvent += (_, _, _, _, _, _, _) => Interlocked.Increment(ref received);
+            var connection = new ProbeConnection(events) { FailAcknowledgement = true };
+            var handled = Completion<bool>();
+            if (controlled) connection.InboundMessageHandler = (_, _) =>
+            {
+                handled.TrySetResult(true);
+                return Task.FromResult(MessageAcknowledgement.Accept());
+            };
+            try
+            {
+                connection.MessageHandler(Encode("submit", "persisted")[0]);
+                if (controlled) await handled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await Task.Delay(100);
+                connection.Drain();
+                Assert.That(received, Is.Zero);
+            }
+            finally { connection.Quit(); }
+        }
+
+        [Test]
+        public async Task AcceptanceBeforeDeadlineSurvivesWaitingForSessionLock()
+        {
+            using var pair = new SocketPair();
+            using var lockHeld = new ManualResetEventSlim();
+            using var releaseLock = new ManualResetEventSlim();
+            var started = Completion<bool>();
+            var finish = Completion<MessageAcknowledgement>();
+            var connection = new ProbeConnection
+            {
+                AcknowledgementTimeout = 1000,
+                InboundMessageHandler = (_, _) => { started.TrySetResult(true); return finish.Task; }
+            };
+            connection.Attach(pair.Local);
+            Task holder = null;
+            try
+            {
+                connection.MessageHandler(Encode("submit", "persisted")[0]);
+                await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                holder = Task.Run(() => connection.HoldSession(() => { lockHeld.Set(); releaseLock.Wait(); }));
+                Assert.That(lockHeld.Wait(3000), Is.True);
+                finish.SetResult(MessageAcknowledgement.Accept("stored"));
+                await Task.Delay(1300);
+                releaseLock.Set();
+                Assert.That(new SubmitSmResp(ReadPdu(pair.Remote.GetStream())).command_status, Is.Zero);
+            }
+            finally { releaseLock.Set(); if (holder != null) await holder; connection.Quit(); }
+        }
+
         [TestCase("submit")]
         [TestCase("deliver")]
         [TestCase("data")]
@@ -249,6 +303,7 @@ namespace Smpp.Tests
                 InboundMessageHandler = (message, _) =>
                 {
                     Assert.That(message.Receipt.ProviderMessageId, Is.EqualTo("provider"));
+                    Assert.That(message.OptionalParameters["001e"], Is.Not.Empty);
                     Assert.That(message.OptionalParameters["0423"], Is.EqualTo("03002A"));
                     return Task.FromResult(MessageAcknowledgement.Reject(0x14));
                 }

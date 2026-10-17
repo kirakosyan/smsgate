@@ -11,7 +11,7 @@ namespace Smpp
         byte MessageState, string ErrorCode, string NetworkErrorCode, int? MessageId = null,
         int? PartNumber = null, int? PartCount = null)
     {
-        public bool IsFinal => MessageState != 1;
+        public bool IsFinal => MessageState != 1 && MessageState != 6;
     }
 
     /// <summary>The delivery state of a multipart message, with a snapshot of all its parts.</summary>

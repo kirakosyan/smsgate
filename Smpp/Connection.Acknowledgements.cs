@@ -11,7 +11,7 @@ namespace Smpp
     public abstract partial class Connection
     {
         private CancellationTokenSource sessionCancellation;
-        private readonly HashSet<object> pendingAcknowledgements = new HashSet<object>();
+        private int pendingAcknowledgements;
         private int maxPendingAcknowledgements = 100;
         private int acknowledgementTimeout = 10000;
         private int activeAcceptanceHandlers;
@@ -47,37 +47,38 @@ namespace Smpp
             var handler = InboundMessageHandler;
             if (handler == null)
             {
-                SendAcknowledgement(request, encodeResponse, MessageAcknowledgement.Accept(generatedId));
-                accepted(generatedId);
+                if (SendAcknowledgement(request, encodeResponse, MessageAcknowledgement.Accept(generatedId)) == 0)
+                    accepted(generatedId);
                 return;
             }
-            if (pendingAcknowledgements.Count >= MaxPendingAcknowledgements ||
+            if (pendingAcknowledgements >= MaxPendingAcknowledgements ||
                 Volatile.Read(ref activeAcceptanceHandlers) >= MaxPendingAcknowledgements)
             {
                 SendAcknowledgement(request, encodeResponse, MessageAcknowledgement.Reject(0x58)); // ESME_RTHROTTLED
                 return;
             }
-            var parameters = new ReadOnlyDictionary<string, string>(request.tlv.ToDictionary(pair => pair.Key, pair => pair.Value.ToString()));
+            var parameters = new ReadOnlyDictionary<string, string>(request.tlv.ToDictionary(pair => pair.Key, pair => pair.Value.ToString(), StringComparer.OrdinalIgnoreCase));
             var message = new InboundMessage(channel_name, generatedId, (Common.CommandId)request.command_id,
                 request.sequence_number, sender, recipient, body, format, registeredDelivery,
                 multipart?.reference, multipart?.part_num, multipart?.num_of_parts, parameters, receipt);
-            object work = new object();
-            pendingAcknowledgements.Add(work);
+            pendingAcknowledgements++;
             Interlocked.Increment(ref activeAcceptanceHandlers);
             int generation = sessionGeneration;
             var token = sessionCancellation?.Token ?? CancellationToken.None;
             // Start the deadline at dispatch, even if the thread pool is busy. Only application work is queued.
-            _ = ProcessInboundAsync(work, generation, token, handler, request, message, encodeResponse, accepted);
+            _ = ProcessInboundAsync(generation, token, handler, request, message, encodeResponse, accepted);
         }
 
-        private void SendAcknowledgement(Pdu request, Func<MessageAcknowledgement, string> encodeResponse, MessageAcknowledgement acknowledgement)
+        protected virtual int WriteAcknowledgement(string pdu) => SendPDU(pdu);
+
+        private int SendAcknowledgement(Pdu request, Func<MessageAcknowledgement, string> encodeResponse, MessageAcknowledgement acknowledgement)
         {
             Common.command_id.TryGetValue(request.command_id | 0x80000000, out var name);
             Notify(() => Events.LogChannelEvent(channel_name, "Sending [" + name + "]"));
-            SendPDU(encodeResponse(acknowledgement));
+            return WriteAcknowledgement(encodeResponse(acknowledgement));
         }
 
-        private async Task ProcessInboundAsync(object work, int generation, CancellationToken sessionToken,
+        private async Task ProcessInboundAsync(int generation, CancellationToken sessionToken,
             Func<InboundMessage, CancellationToken, Task<MessageAcknowledgement>> handler, Pdu request, InboundMessage message,
             Func<MessageAcknowledgement, string> encodeResponse, Action<string> accepted)
         {
@@ -115,12 +116,13 @@ namespace Smpp
             }
             lock (SessionLock)
             {
-                if (!pendingAcknowledgements.Remove(work) || stopped || sessionGeneration != generation || sessionToken.IsCancellationRequested)
+                if (sessionGeneration != generation)
                     return;
-                if (deadline.IsCancellationRequested)
-                    response = MessageAcknowledgement.Reject(8);
-                SendAcknowledgement(request, encodeResponse, response);
-                if (response.CommandStatus == 0)
+                pendingAcknowledgements--;
+                if (stopped || sessionToken.IsCancellationRequested)
+                    return;
+                int result = SendAcknowledgement(request, encodeResponse, response);
+                if (result == 0 && sessionGeneration == generation && response.CommandStatus == 0)
                     accepted(response.MessageId);
             }
         }

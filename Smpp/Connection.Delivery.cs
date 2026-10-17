@@ -13,13 +13,20 @@ namespace Smpp
             internal string ProviderId = "";
             internal Common.MessageStatus? Status;
             internal bool Final;
-            internal DateTime TrackedAt;
         }
 
-        private readonly Dictionary<string, DeliveryPart> deliveryParts = new Dictionary<string, DeliveryPart>();
-        private readonly Dictionary<string, (DeliveryReceipt Receipt, DateTime ReceivedAt)> earlyReceipts =
-            new Dictionary<string, (DeliveryReceipt, DateTime)>();
-        private readonly Dictionary<string, DateTime> ambiguousReceiptIds = new Dictionary<string, DateTime>();
+        private sealed class DeliveryGroup
+        {
+            internal readonly List<DeliveryPart> Parts = new();
+            internal DeliveryReceipt LastReceipt;
+        }
+        private readonly TimedCache<DeliveryGroup> deliveryParts = new();
+        private readonly TimedCache<DeliveryReceipt> earlyReceipts = new();
+        private readonly TimedCache<bool> ambiguousReceiptIds = new();
+        /// <summary>Set true for providers treating ACCEPTD as terminal. Default permits later handset delivery.</summary>
+        public bool AcceptedReceiptsAreFinal { get; set; }
+        private bool IsFinalReceipt(DeliveryReceipt receipt) => receipt.IsFinal ||
+            (AcceptedReceiptsAreFinal && receipt.MessageState == 6);
         private TimeSpan deliveryTrackingLifetime = TimeSpan.FromHours(24);
         private int maxTrackedDeliveryParts = 10000;
 
@@ -77,46 +84,58 @@ namespace Smpp
                 PublishDeliveryStatus(submission);
                 return;
             }
-            if (deliveryParts.TryGetValue(providerId, out var previous) && !ReferenceEquals(part, previous))
+            if (deliveryParts.TryGetValue(providerId, out var group))
             {
-                deliveryParts.Remove(providerId);
-                if (ambiguousReceiptIds.Count >= MaxTrackedDeliveryParts)
-                    ambiguousReceiptIds.Remove(ambiguousReceiptIds.MinBy(pair => pair.Value).Key);
-                ambiguousReceiptIds[providerId] = DateTime.UtcNow;
-                previous.Status = part.Status = Common.MessageStatus.generic_error;
-                previous.Final = part.Final = true;
-                PublishDeliveryStatus(previous.Submission);
-                PublishDeliveryStatus(submission);
-                Notify(() => Events.LogEvent(Smpp.Events.LogEvent.Level.Error, channel_name + " - Ambiguous provider message ID: " + providerId));
-                return;
+                if (!ReferenceEquals(group.Parts[0].Submission, submission))
+                {
+                    deliveryParts.Remove(providerId, out _);
+                    ambiguousReceiptIds.Set(providerId, true);
+                    ambiguousReceiptIds.Trim(MaxTrackedDeliveryParts, DateTime.MinValue);
+                    foreach (var previous in group.Parts)
+                    {
+                        previous.Status = Common.MessageStatus.generic_error;
+                        previous.Final = true;
+                    }
+                    part.Status = Common.MessageStatus.generic_error;
+                    part.Final = true;
+                    PublishDeliveryStatus(group.Parts[0].Submission);
+                    PublishDeliveryStatus(submission);
+                    Notify(() => Events.LogEvent(Smpp.Events.LogEvent.Level.Error, channel_name + " - Ambiguous provider message ID: " + providerId));
+                    return;
+                }
             }
-            while (deliveryParts.Count >= MaxTrackedDeliveryParts)
-                ExpireDeliveryPart(deliveryParts.MinBy(pair => pair.Value.TrackedAt).Key);
-            part.TrackedAt = DateTime.UtcNow;
-            deliveryParts[providerId] = part;
-            if (earlyReceipts.Remove(providerId, out var early))
-                UpdateTrackedReceipt(part, early.Receipt);
+            else
+            {
+                group = new DeliveryGroup();
+                deliveryParts.Set(providerId, group);
+                deliveryParts.Trim(MaxTrackedDeliveryParts, DateTime.MinValue, ExpireDeliveryGroup);
+            }
+            group.Parts.Add(part);
+            if (earlyReceipts.Remove(providerId, out var early)) group.LastReceipt = early;
+            if (group.LastReceipt != null) UpdateTrackedReceipt(part, group.LastReceipt);
         }
 
         private void ReportReceipt(DeliveryReceipt receipt)
         {
             ExpireDeliveryTracking(DateTime.UtcNow);
-            if (deliveryParts.TryGetValue(receipt.ProviderMessageId, out var part))
+            if (deliveryParts.TryGetValue(receipt.ProviderMessageId, out var group))
             {
+                var part = group.Parts[0];
                 receipt = receipt with
                 {
-                    MessageId = part.Submission.MessageId, PartNumber = part.Number,
+                    MessageId = part.Submission.MessageId,
+                    PartNumber = group.Parts.Count == 1 ? part.Number : null,
                     PartCount = part.Submission.Parts.Length
                 };
-                UpdateTrackedReceipt(part, receipt);
+                if (group.LastReceipt == null || !IsFinalReceipt(group.LastReceipt)) group.LastReceipt = receipt;
+                foreach (var tracked in group.Parts) UpdateTrackedReceipt(tracked, receipt);
             }
             else if (!ambiguousReceiptIds.ContainsKey(receipt.ProviderMessageId))
             {
-                if (!earlyReceipts.TryGetValue(receipt.ProviderMessageId, out var previous) || !previous.Receipt.IsFinal)
+                if (!earlyReceipts.TryGetValue(receipt.ProviderMessageId, out var previous) || !IsFinalReceipt(previous))
                 {
-                    if (earlyReceipts.Count >= MaxTrackedDeliveryParts)
-                        earlyReceipts.Remove(earlyReceipts.MinBy(pair => pair.Value.ReceivedAt).Key);
-                    earlyReceipts[receipt.ProviderMessageId] = (receipt, DateTime.UtcNow);
+                    earlyReceipts.Set(receipt.ProviderMessageId, receipt);
+                    earlyReceipts.Trim(MaxTrackedDeliveryParts, DateTime.MinValue);
                 }
             }
             var notification = receipt;
@@ -126,10 +145,9 @@ namespace Smpp
 
         private void UpdateTrackedReceipt(DeliveryPart part, DeliveryReceipt receipt)
         {
-            if (part.Final)
-                return;
+            if (part.Final) return;
             part.Status = receipt.Status;
-            part.Final = receipt.IsFinal;
+            part.Final = IsFinalReceipt(receipt);
             PublishDeliveryStatus(part.Submission);
         }
 
@@ -151,29 +169,28 @@ namespace Smpp
             Notify(() => Events.OnDeliveryStatus(result));
         }
 
-        private void ExpireDeliveryPart(string providerId)
+        private void ExpireDeliveryGroup(DeliveryGroup group)
         {
-            if (!deliveryParts.Remove(providerId, out var part) || part.Final)
-                return;
-            part.Status = Common.MessageStatus.timeout;
-            part.Final = true;
-            PublishDeliveryStatus(part.Submission);
+            foreach (var part in group.Parts)
+            {
+                if (part.Final) continue;
+                part.Status = Common.MessageStatus.timeout;
+                part.Final = true;
+                PublishDeliveryStatus(part.Submission);
+            }
         }
 
         private void ExpireDeliveryTracking(DateTime now)
         {
-            foreach (string id in deliveryParts.Where(pair => now - pair.Value.TrackedAt >= DeliveryTrackingLifetime).Select(pair => pair.Key).ToArray())
-                ExpireDeliveryPart(id);
-            foreach (string id in earlyReceipts.Where(pair => now - pair.Value.ReceivedAt >= DeliveryTrackingLifetime).Select(pair => pair.Key).ToArray())
-                earlyReceipts.Remove(id);
-            foreach (string id in ambiguousReceiptIds.Where(pair => now - pair.Value >= DeliveryTrackingLifetime).Select(pair => pair.Key).ToArray())
-                ambiguousReceiptIds.Remove(id);
+            var cutoff = now - DeliveryTrackingLifetime;
+            deliveryParts.Trim(MaxTrackedDeliveryParts, cutoff, ExpireDeliveryGroup);
+            earlyReceipts.Trim(MaxTrackedDeliveryParts, cutoff);
+            ambiguousReceiptIds.Trim(MaxTrackedDeliveryParts, cutoff);
         }
 
         private void ClearDeliveryTracking()
         {
-            foreach (string id in deliveryParts.Keys.ToArray())
-                ExpireDeliveryPart(id);
+            deliveryParts.Clear(ExpireDeliveryGroup);
             earlyReceipts.Clear();
             ambiguousReceiptIds.Clear();
         }

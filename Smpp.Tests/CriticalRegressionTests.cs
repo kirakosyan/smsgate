@@ -121,7 +121,7 @@ namespace Smpp.Tests
                 receivedMessages.Add(body);
 
             var gate = new Gate(events);
-            var client = gate.AddClientConnection("client", "127.0.0.1", 2775, "system", "password");
+            var client = new ReviewTestSupport.ProbeConnection(events);
             var deliverSm = new DeliverSm(events)
             {
                 Sender = "1000",

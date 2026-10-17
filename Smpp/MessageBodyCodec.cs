@@ -125,6 +125,9 @@ namespace Smpp
 
         private static string Pack(string body, int fillBits, bool gsm7)
         {
+            // Lengthless packed transport uses the TS 23.038 USSD padding convention.
+            if (gsm7 && body.EndsWith('\r') && (body.Length * 7 + fillBits) % 8 == 0)
+                body += '\r';
             var bytes = new byte[(body.Length * 7 + fillBits + 7) / 8];
             for (int i = 0; i < body.Length; i++)
             {
@@ -160,6 +163,9 @@ namespace Smpp
             if (gsm7)
             {
                 if ((bytes.Length * 8 - fillBits) % 7 == 0 && result.Length > 0 && result[^1] == '\r')
+                    result.Length--;
+                else if (result.Length > 1 && result[^1] == '\r' && result[^2] == '\r' &&
+                    ((result.Length - 1) * 7 + fillBits) % 8 == 0)
                     result.Length--;
                 return result.ToString();
             }

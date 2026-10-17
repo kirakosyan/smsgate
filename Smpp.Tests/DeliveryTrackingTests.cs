@@ -25,6 +25,96 @@ namespace Smpp.Tests
             return data ? ((DataSm)message).EncodeM()[0] : ((DeliverSm)message).EncodeM()[0];
         }
 
+        [Test]
+        public void SuccessfulDeliverAcknowledgementDoesNotInventADeliveryFailure()
+        {
+            var parts = new List<MessagePartStatus>();
+            var delivery = new List<MessageDeliveryStatus>();
+            var events = new GateEvents();
+            events.MessagePartStatusEvent += parts.Add;
+            events.MessageDeliveryStatusEvent += delivery.Add;
+            using var pair = new SocketPair();
+            var connection = new ProbeConnection(events);
+            try
+            {
+                connection.Attach(pair.Local);
+                Assert.That(connection.SendDeliver(42), Is.Zero);
+                var request = new DeliverSm(ReadPdu(pair.Remote.GetStream()));
+                connection.MessageHandler(new DeliverSmResp { sequence_number = request.sequence_number }.Encode());
+                Assert.That(parts.Single().CommandStatus, Is.Zero);
+                Assert.That(delivery, Is.Empty);
+            }
+            finally { connection.Quit(); }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void InvalidReceiptTlvValuesFallBackToValidText(bool data)
+        {
+            var receipts = new List<DeliveryReceipt>();
+            var events = new GateEvents();
+            events.DeliveryReceiptEvent += receipts.Add;
+            var connection = new ProbeConnection(events);
+            try
+            {
+                string frame = Receipt("wrong", 2, data, "id:text-id stat:DELIVRD err:123");
+                frame = frame.Replace("001E000677726F6E6700", "001E000677726F6E6741").Replace("0427000102", "0427000100").Replace("0423000303002A", "0423000403002A00");
+                frame = (frame.Length / 2).ToString("X8") + frame.Substring(8);
+                connection.MessageHandler(frame);
+                Assert.That(receipts, Has.Count.EqualTo(1));
+                Assert.That(receipts[0].ProviderMessageId, Is.EqualTo("text-id"));
+                Assert.That(receipts[0].Status, Is.EqualTo(Common.MessageStatus.delivered_ACK_received));
+                Assert.That(receipts[0].NetworkErrorCode, Is.Empty);
+            }
+            finally { connection.Quit(); }
+        }
+        [TestCase(false)]
+        [TestCase(true)]
+        public void OneProviderIdCanCoverEverySegmentIncludingAnEarlyReceipt(bool early)
+        {
+            var results = new List<MessageDeliveryStatus>();
+            var events = new GateEvents();
+            events.MessageDeliveryStatusEvent += results.Add;
+            using var pair = new SocketPair();
+            var connection = new ProbeConnection(events) { multypart_delay = 0 };
+            try
+            {
+                connection.Attach(pair.Local);
+                connection.SubmitSm(42, "1", "2", new string('a', 161));
+                var first = new SubmitSm(ReadPdu(pair.Remote.GetStream()));
+                var second = new SubmitSm(ReadPdu(pair.Remote.GetStream()));
+                connection.MessageHandler(new SubmitSmResp { sequence_number = first.sequence_number, MessageID = "shared" }.Encode());
+                if (early) connection.MessageHandler(Receipt("shared", 2));
+                connection.MessageHandler(new SubmitSmResp { sequence_number = second.sequence_number, MessageID = "shared" }.Encode());
+                if (!early) connection.MessageHandler(Receipt("shared", 2));
+                Assert.That(results.Single(x => x.IsComplete).Status, Is.EqualTo(Common.MessageStatus.delivered_ACK_received));
+                Assert.That(results.Last().Parts.Select(x => x.ProviderMessageId), Is.All.EqualTo("shared"));
+            }
+            finally { connection.Quit(); }
+        }
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AcceptedReceiptCanProgressToDeliveredUnlessProviderUsesFinalAcceptance(bool finalAcceptance)
+        {
+            var results = new List<MessageDeliveryStatus>();
+            var events = new GateEvents();
+            events.MessageDeliveryStatusEvent += results.Add;
+            using var pair = new SocketPair();
+            var connection = new ProbeConnection(events) { AcceptedReceiptsAreFinal = finalAcceptance };
+            try
+            {
+                connection.Attach(pair.Local);
+                connection.SubmitSm(42, "1", "2", "hello");
+                var request = new SubmitSm(ReadPdu(pair.Remote.GetStream()));
+                connection.MessageHandler(new SubmitSmResp { sequence_number = request.sequence_number, MessageID = "provider" }.Encode());
+                connection.MessageHandler(Receipt("provider", 6));
+                Assert.That(results.Last().IsComplete, Is.EqualTo(finalAcceptance));
+                connection.MessageHandler(Receipt("provider", 2));
+                Assert.That(results.Last().Status, Is.EqualTo(finalAcceptance ? Common.MessageStatus.received_routed : Common.MessageStatus.delivered_ACK_received));
+            }
+            finally { connection.Quit(); }
+        }
+
         [TestCase(false)]
         [TestCase(true)]
         public void TlvOnlyReceiptsUseStandardFieldsAndExposeNetworkErrors(bool data)

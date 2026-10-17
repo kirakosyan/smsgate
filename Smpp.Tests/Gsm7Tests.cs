@@ -33,7 +33,24 @@ namespace Smpp.Tests
         [TestCase("1B00")]
         [TestCase("FF")]
         public void MalformedSeptetsAreRejected(string hex) =>
-            Assert.Throws<FormatException>(() => Gsm7Encoding.Decode(Convert.FromHexString(hex)));
+            Assert.Throws<FormatException>(() => Gsm7Encoding.Decode(Convert.FromHexString(hex), strict: true));
+
+        [TestCase("1B", " ")]
+        [TestCase("1B1B", " ")]
+        [TestCase("1B00", "@")]
+        public void UnsupportedExtensionsHaveReceiveFallbacks(string hex, string expected) =>
+            Assert.That(Gsm7Encoding.Decode(Convert.FromHexString(hex)), Is.EqualTo(expected));
+        [TestCase("submit")]
+        [TestCase("deliver")]
+        public void PackedTrailingCarriageReturnsArePreserved(string command)
+        {
+            for (int length = 1; length <= 320; length++)
+            {
+                string text = new string('a', length - 1) + "\r";
+                var frames = Encode(command, text, "gsm7", packed: true);
+                Assert.That(string.Concat(frames.Select(frame => DecodeGsm(command, frame, true))), Is.EqualTo(text), "length=" + length);
+            }
+        }
 
         [TestCase("submit")]
         [TestCase("deliver")]

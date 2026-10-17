@@ -53,8 +53,8 @@ namespace Smpp
             return result.ToArray();
         }
 
-        /// <summary>Decodes unpacked septets, rejecting malformed escape sequences.</summary>
-        public static string Decode(ReadOnlySpan<byte> septets)
+        /// <summary>Decodes unpacked septets. Unknown extensions fall back to the base alphabet; strict mode rejects them.</summary>
+        public static string Decode(ReadOnlySpan<byte> septets, bool strict = false)
         {
             var result = new StringBuilder(septets.Length);
             for (int index = 0; index < septets.Length; index++)
@@ -68,7 +68,11 @@ namespace Smpp
                     continue;
                 }
                 if (++index == septets.Length)
-                    throw new FormatException("Truncated GSM-7 extension escape.");
+                {
+                    if (strict) throw new FormatException("Truncated GSM-7 extension escape.");
+                    result.Append(' ');
+                    break;
+                }
                 bool found = false;
                 foreach (var extension in Extensions)
                     if (extension.Value == septets[index])
@@ -78,7 +82,10 @@ namespace Smpp
                         break;
                     }
                 if (!found)
-                    throw new FormatException("Unknown GSM-7 extension character.");
+                {
+                    if (strict || septets[index] > 127) throw new FormatException("Unknown GSM-7 extension character.");
+                    result.Append(septets[index] == 0x1B ? ' ' : Alphabet[septets[index]]);
+                }
             }
             return result.ToString();
         }

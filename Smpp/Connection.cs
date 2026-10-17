@@ -574,7 +574,7 @@ namespace Smpp
                 if (sessionCancellation != null)
                     _ = CancelSessionAsync(sessionCancellation);
                 sessionCancellation = null;
-                pendingAcknowledgements.Clear();
+                pendingAcknowledgements = 0;
                 tcp_client = null;
                 sessionGeneration++;
                 stream?.Dispose();
@@ -792,7 +792,8 @@ namespace Smpp
                     var deliver = new DeliverSm(pdu) { Is8bit = use8bit, UseGsm7 = UseGsm7 };
                     deliver.Decode();
                     bool deliverReceipt = (deliver.ESMClass & 0x3C) == 4;
-                    var parsedReceipt = deliverReceipt ? DeliveryReceiptParser.Parse(channel_name, deliver.Body, deliver.tlv) : null;
+                    var parsedReceipt = deliver.ParsedReceipt == null ? null : deliver.ParsedReceipt with { ChannelName = channel_name };
+                    foreach (string warning in deliver.ReceiptWarnings) LogReceiptWarning(warning);
                     DispatchInbound(deliver, deliver.Sender, deliver.Recipient, deliver.Body, deliver.BodyFormat,
                         deliver.RegisteredDelivery, deliver.isMultipart ? deliver.MultipartMessage : null, parsedReceipt,
                         ack => new DeliverSmResp { sequence_number = sequence, command_status = ack.CommandStatus, MessageID = ack.MessageId }.Encode(),
@@ -805,7 +806,7 @@ namespace Smpp
                             deliver.Body = assembled;
                         }
                         if (deliverReceipt)
-                            ReportDelivery(deliver.Body, deliver.tlv);
+                            ReportDelivery(deliver.isMultipart ? ParseReceipt(deliver.Body, deliver.tlv) : parsedReceipt);
                         else
                         {
                             Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + deliver.Sender + " to " + deliver.Recipient));
@@ -819,7 +820,7 @@ namespace Smpp
                     if (UseGsm7)
                         data.Decode();
                     bool dataReceipt = (data.ESMClass & 0x3C) == 4;
-                    var parsedDataReceipt = dataReceipt ? DeliveryReceiptParser.Parse(channel_name, data.Body, data.tlv) : null;
+                    var parsedDataReceipt = dataReceipt ? ParseReceipt(data.Body, data.tlv) : null;
                     DispatchInbound(data, data.Sender, data.Recipient, data.Body, data.BodyFormat,
                         data.RegisteredDelivery, data.isMultipart ? data.MultipartMessage : null, parsedDataReceipt,
                         ack => new DataSmResp { sequence_number = sequence, command_status = ack.CommandStatus, MessageID = ack.MessageId }.Encode(),
@@ -832,7 +833,7 @@ namespace Smpp
                             data.Body = assembled;
                         }
                         if (dataReceipt)
-                            ReportDelivery(data.Body, data.tlv);
+                            ReportDelivery(data.isMultipart ? ParseReceipt(data.Body, data.tlv) : parsedDataReceipt);
                         else
                         {
                             Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + data.Sender + " to " + data.Recipient));
@@ -876,19 +877,18 @@ namespace Smpp
             }
         }
 
-        private void ReportDelivery(string body, SortedList<string, object> parameters)
+        private void LogReceiptWarning(string warning) =>
+            Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - " + warning));
+        private DeliveryReceipt ParseReceipt(string body, SortedList<string, object> parameters) =>
+            DeliveryReceiptParser.Parse(channel_name, body, parameters, LogReceiptWarning);
+        private void ReportDelivery(DeliveryReceipt receipt)
         {
-            var receipt = DeliveryReceiptParser.Parse(channel_name, body, parameters);
             if (receipt == null)
             {
                 Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Delivery report has no valid ID/status"));
                 return;
             }
-            string legacyState = receipt.MessageState switch
-            {
-                1 => "ENROUT", 2 => "DELIVR", 3 => "EXPIRE", 4 => "DELETE",
-                5 => "UNDELI", 6 => "ACCEPT", 7 => "UNKNOW", 8 => "REJECT", _ => ""
-            };
+            string legacyState = DeliveryReceiptParser.StateText(receipt.MessageState, legacy: true);
             Notify(() => Events.LogChannelEvent(channel_name, "Message ref: " + receipt.ProviderMessageId + " " + legacyState));
             ReportReceipt(receipt);
         }
@@ -897,19 +897,8 @@ namespace Smpp
         {
             lock (SessionLock)
             {
-                string messageStatus = status switch
-                {
-                    Common.MessageStatus.delivered_ACK_received or Common.MessageStatus.duplicate_ACK_detected => "DELIVRD",
-                    Common.MessageStatus.ACK_expired or Common.MessageStatus.timeout => "EXPIRED",
-                    Common.MessageStatus.queued or Common.MessageStatus.received_waiting_to_be_processed or
-                        Common.MessageStatus.scheduled or Common.MessageStatus.received_routed => "ACCEPTD",
-                    Common.MessageStatus.sent or Common.MessageStatus.submitted_waiting_for_ACK => "ENROUTE",
-                    Common.MessageStatus.generic_error or Common.MessageStatus.locked_by_system or
-                        Common.MessageStatus.NACK_received or Common.MessageStatus.rejected or Common.MessageStatus.out_of_balance => "REJECTD",
-                    Common.MessageStatus.message_undeliverable or Common.MessageStatus.received_route_failure or
-                        Common.MessageStatus.received_no_route_specified or Common.MessageStatus.no_channel_can_handle_message => "UNDELIV",
-                    _ => "UNKNOWN"
-                };
+                byte state = DeliveryReceiptParser.FromStatus(status);
+                string messageStatus = DeliveryReceiptParser.StateText(state);
                 var report = new DeliverSm(Events)
                 {
                     sequence_number = NextSequenceNumber(), Sender = "", Recipient = "", BodyFormat = "ascii",
@@ -923,11 +912,7 @@ namespace Smpp
                 if (!string.IsNullOrEmpty(messageId) && messageId.Length <= 64 && messageId.All(value => value > 0 && value < 128))
                 {
                     report.tlv["001E"] = Common.StringToHex(messageId) + "00";
-                    report.tlv["0427"] = (messageStatus switch
-                    {
-                        "ENROUTE" => 1, "DELIVRD" => 2, "EXPIRED" => 3, "UNDELIV" => 5,
-                        "ACCEPTD" => 6, "REJECTD" => 8, _ => 7
-                    }).ToString("X2");
+                    report.tlv["0427"] = state.ToString("X2");
                 }
                 string pdu = report.EncodeM()[0];
                 Notify(() => Events.LogChannelEvent(channel_name, "Sending [deliver_sm] report", debug ? pdu : ""));
@@ -1029,7 +1014,7 @@ namespace Smpp
                 }
                 var message = new submitted_message
                 {
-                    message_id = messageId, submitted_time = DateTime.MaxValue, registered_delivery = deliveryReport
+                    message_id = messageId, submitted_time = DateTime.MaxValue, registered_delivery = deliveryReport && commandName != "deliver_sm"
                 };
                 if (!TryTrackSubmittedMessages(firstSequence, parts.Length, message))
                 {
