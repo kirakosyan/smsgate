@@ -12,6 +12,7 @@ The NuGet package is `SMSGate`; the assembly and namespaces are `Smpp`. Versions
    dotnet restore SMSGate.sln -warnaserror
    dotnet test SMSGate.sln --configuration Debug --no-restore -warnaserror
    dotnet test SMSGate.sln --configuration Release --no-restore -warnaserror
+   dotnet restore Smpp/Smpp.csproj -warnaserror -p:EnablePackageValidation=true -p:PackageValidationBaselineVersion=1.0.0
    dotnet pack Smpp/Smpp.csproj --configuration Release --no-build --no-restore -warnaserror --output artifacts -p:EnablePackageValidation=true -p:PackageValidationBaselineVersion=1.0.0
    dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifacts" -warnaserror
    dotnet run --project examples/LocalExchange/LocalExchange.csproj --configuration Release --no-restore
