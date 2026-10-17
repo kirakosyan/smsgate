@@ -31,6 +31,9 @@ namespace Smpp.Requests
         protected string short_message;
         protected bool is_8bit;
 
+        /// <summary>Interpret data_coding 0 as GSM-7 rather than the legacy single-byte alphabet.</summary>
+        public bool UseGsm7 { get; set; }
+
         protected int split_base_ascii = Common.ASCII_MESSAGE_SPLIT_BASE;
 
         protected int large_message_handle_method = 1;
@@ -79,6 +82,7 @@ namespace Smpp.Requests
             set
             {
                 data_coding = Common.body_format[value];
+                UseGsm7 = value == "gsm7";
             }
 
             get
@@ -86,6 +90,7 @@ namespace Smpp.Requests
                 switch (data_coding)
                 {
                     case 0:
+                        return UseGsm7 ? "gsm7" : "ascii";
                     case 1:
                         return "ascii";
                     case 2:
@@ -253,7 +258,7 @@ namespace Smpp.Requests
         public virtual string[] EncodeM()
         {
             var encoded = MessageBodyCodec.Encode(short_message, data_coding,
-                large_message_handle_method, split_base_ascii, is_8bit, multipart_ref_number);
+                large_message_handle_method, split_base_ascii, is_8bit, multipart_ref_number, UseGsm7);
             var parts = new string[encoded.Length];
             for (int i = 0; i < encoded.Length; i++)
             {
@@ -267,6 +272,7 @@ namespace Smpp.Requests
                 response.Append(registered_delivery);
                 response.AppendFormat("00{0:X2}00", data_coding);
                 response.Append(part.Field);
+                response.Append(EncodeOptionalParameters(large_message_handle_method == 2, part.Field != "00"));
                 parts[i] = (response.Length / 2 + 4).ToString("X8") + response;
             }
             return parts;
@@ -315,7 +321,7 @@ namespace Smpp.Requests
             LoadTLV(tail);
             if (sm_length == 0 && tlv.TryGetValue("0424", out var payload))
                 messageHex = payload.ToString();
-            short_message = MessageBodyCodec.Decode(messageHex, data_coding, esm_class, is_8bit, out multipart_header);
+            short_message = MessageBodyCodec.Decode(messageHex, data_coding, esm_class, is_8bit, out multipart_header, UseGsm7);
         }
 
     }

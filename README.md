@@ -6,6 +6,8 @@
 
 SMSGate is a lightweight, dependency-free SMPP 3.4 client and server library for **.NET 10**. Use its event-driven API to send and receive SMS, process delivery receipts, handle multipart messages, and test SMPP sessions locally.
 
+The development branch also includes opt-in GSM-7 encoding, complete multipart delivery tracking, TLS, and application-controlled acknowledgements. These additions are not in the published 1.0.0 package. See the [provider integration guide](https://github.com/kirakosyan/smsgate/blob/master/docs/PROVIDER_INTEGRATION.md) and the [runnable TLS example](https://github.com/kirakosyan/smsgate/tree/master/examples/ProviderFeatures).
+
 ## Install
 
 ```bash
@@ -38,6 +40,7 @@ Out of the box, the implementation supports:
 - `Smpp/` - the SMPP library
 - `Smpp.Tests/` - NUnit-based command and integration tests
 - `examples/LocalExchange/` - a runnable example that consumes the NuGet package
+- `examples/ProviderFeatures/` - validated TLS, GSM-7 multipart delivery, and storage before acknowledgement
 
 ## Requirements
 
@@ -185,6 +188,8 @@ For server-originated traffic:
 The library maps these body format names internally:
 
 - `ascii` - text using the library's existing single-byte mapping
+- `gsm7` - the GSM 03.38 default alphabet and extension table, sent with `data_coding = 0`
+- `auto` - on `Client.SubmitSm` and `Server.SubmitSm`, selects GSM-7 when possible, otherwise Unicode
 - `binary` - hexadecimal octets, such as `00FF80`; decoded bodies are uppercase hex
 - `latin` - ISO-8859-1 text
 - `unicode` - big-endian UTF-16 text
@@ -193,6 +198,8 @@ The library maps these body format names internally:
 For `submit_sm` and `deliver_sm`, `large_message` selects multipart (1), a `message_payload` TLV (2), truncation (3), or an exception when the single-message limit is exceeded (4). Single-message limits are 160 ASCII characters, 70 UTF-16 code units, or 140 Latin/binary octets. Multipart bodies use up to 153 ASCII characters, 63 UTF-16 code units, or 134 Latin/binary octets per segment. Surrogate pairs stay together. More than 255 segments or a payload larger than 65,535 octets is rejected before sending. `data_sm` always uses a payload TLV.
 
 Long WAP Push bodies must use payload mode (`large_message = 2`); multipart mode rejects them before sending so that the port-addressing UDH remains valid.
+
+For GSM-7 providers, set `UseGsm7 = true` on the receiving connection and send with `body_format: "gsm7"` or `"auto"`. Extension characters such as `€`, `{`, and `^` count as two septets; multipart splitting keeps escape sequences together. Explicit `gsm7` rejects unsupported characters instead of replacing them. Existing `ascii` behavior remains available for compatibility.
 
 Multipart reassembly supports `submit_sm`, `deliver_sm`, and `data_sm` and separates sender, recipient, format, and command type as well as the reference number. Already-acknowledged segments survive transient disconnects and rebinds. Duplicate segments do not count twice; incomplete assemblies expire after five minutes, and explicit `Quit()` clears them. Reusing the same reference for overlapping messages with identical addressing and format remains ambiguous on the wire.
 
@@ -229,8 +236,13 @@ Connection events are dispatched asynchronously in order per connection, outside
 | `MessageStatusEvent` | Message lifecycle changes for submitted messages |
 | `MessageDeliveryReportEvent` | Delivery reports parsed from inbound `deliver_sm` PDUs |
 | `NewMessageEvent` | Application-facing inbound messages with sender, recipient, body, and format |
+| `MessagePartStatusEvent` | Every PDU acknowledgement or timeout, with segment number, provider ID, and raw SMPP response code |
+| `DeliveryReceiptEvent` | Parsed receipt fields, error details, and message/segment correlation when available |
+| `MessageDeliveryStatusEvent` | Multipart delivery progress and one terminal result with a snapshot of all parts |
 
 Each submission emits its initial waiting/routed status once. A multipart submission reports `sent` only after all segments succeed, using the first segment's SMSC message ID. The first nonzero response reports `rejected`, including unrecognized vendor errors; later successes or missing acknowledgements cannot replace that rejection. Delivery receipts require a valid ID and recognized status. Missing, truncated, or unknown receipt fields are logged instead of being treated as successful delivery.
+
+The legacy events retain these semantics. The new tracking events expose every segment ID and support standard receipt TLVs on both `deliver_sm` and `data_sm`, with text receipts as a fallback. A complete message is reported delivered only after every segment is delivered. See the integration guide for tracking retention limits, early receipts, and acknowledgement control.
 
 Complete message requests that cannot be decoded receive an error `generic_nack` with their sequence number. Invalid frame lengths close the stream because its boundaries cannot be recovered. `alert_notification` and `outbind` on an established session receive no response.
 
@@ -264,6 +276,8 @@ The implementation is usable, but there are several behaviors worth knowing befo
 - Connection registries are stored in static global collections, so multiple `Gate` instances share process-wide state.
 - Connection configuration and the public registries remain mutable. Set configuration before traffic and avoid modifying the registries directly while connections are active.
 - Packed ASCII has no separate septet count in the PDU; a trailing zero septet is treated as padding.
+- Packed GSM-7 uses CR padding; a genuine trailing CR can be ambiguous without a separate septet count. Unpacked GSM-7 is recommended for SMPP providers.
+- Automatic acknowledgements remain the compatibility default. Set `InboundMessageHandler` to persist or reject each incoming PDU before responding; ordinary event handlers remain observational.
 
 ## Development Notes
 

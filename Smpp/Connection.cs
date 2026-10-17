@@ -14,7 +14,7 @@ namespace Smpp
     /// <summary>
     /// Base abstract class for server and client connections
     /// </summary>
-    public abstract class Connection
+    public abstract partial class Connection
     {
         protected SortedList<uint, DateTime> commands_queue;
         protected SortedList<uint, submitted_message> submitted_messages;
@@ -37,10 +37,15 @@ namespace Smpp
             internal uint FirstSequence;
             internal string ResponseId = "";
             internal bool Completed;
+            internal DeliveryPart[] Parts;
+            internal bool DeliveryCompleted;
+            internal bool TrackDelivery;
+            internal int MessageId;
         }
 
         protected TcpClient tcp_client;
         protected NetworkStream tcp_stream;
+        private System.IO.Stream sessionStream;
 
         /// <summary>
         /// Incomplete frame retained between socket reads.
@@ -235,6 +240,9 @@ namespace Smpp
         /// </summary>
         public bool use8bit = false;
 
+        /// <summary>Decode inbound data_coding 0 as GSM-7. Configure this to match the provider's default alphabet.</summary>
+        public bool UseGsm7 { get; set; }
+
         /// <summary>
         /// maximum number of threads while sending, 0 by default
         /// 0 = no limit
@@ -295,7 +303,7 @@ namespace Smpp
         private uint pendingBindResponse;
         private int sessionGeneration;
         private static readonly TimeSpan MultipartLifetime = TimeSpan.FromMinutes(5);
-        private NetworkStream receivingStream;
+        private System.IO.Stream receivingStream;
         private bool invalidFraming;
         private readonly Queue<Action> notifications = new Queue<Action>();
         private bool dispatchingNotifications;
@@ -421,11 +429,15 @@ namespace Smpp
             throw new InvalidOperationException("No free SMPP sequence range.");
         }
 
-        protected void BeginSession(TcpClient client, bool bound)
+        protected void BeginSession(TcpClient client, bool bound) => BeginSession(client, bound, client.GetStream());
+
+        protected void BeginSession(TcpClient client, bool bound, System.IO.Stream transport)
         {
             tcp_client = client;
             tcp_stream = client.GetStream();
-            tcp_stream.WriteTimeout = timeout;
+            sessionStream = transport;
+            sessionStream.WriteTimeout = timeout;
+            sessionCancellation = new CancellationTokenSource();
             connected = bound;
             pendingBindSequence = null;
             _partial_pdu = "";
@@ -465,15 +477,15 @@ namespace Smpp
         {
             lock (SessionLock)
             {
-                if (tcp_stream == null || stopped || ReferenceEquals(receivingStream, tcp_stream))
+                if (sessionStream == null || stopped || ReferenceEquals(receivingStream, sessionStream))
                     return;
-                var stream = tcp_stream;
+                var stream = sessionStream;
                 receivingStream = stream;
                 _ = Task.Run(() => ReceiveLoopAsync(stream));
             }
         }
 
-        private async Task ReceiveLoopAsync(NetworkStream stream)
+        private async Task ReceiveLoopAsync(System.IO.Stream stream)
         {
             var buffer = new byte[8192];
             try
@@ -484,7 +496,7 @@ namespace Smpp
                     lock (SessionLock)
                     {
                         // A read from a closed socket must never touch its replacement session.
-                        if (!ReferenceEquals(tcp_stream, stream))
+                        if (!ReferenceEquals(sessionStream, stream))
                             return;
                         if (count == 0)
                         {
@@ -492,7 +504,7 @@ namespace Smpp
                             return;
                         }
                         MessageHandler(Common.ConvertByteArrayToHexString(buffer, count));
-                        if (!ReferenceEquals(tcp_stream, stream))
+                        if (!ReferenceEquals(sessionStream, stream))
                             return;
                     }
                 }
@@ -501,7 +513,7 @@ namespace Smpp
             {
                 lock (SessionLock)
                 {
-                    if (!ReferenceEquals(tcp_stream, stream))
+                    if (!ReferenceEquals(sessionStream, stream))
                         return;
                     Notify(() => Events.LogChannelEvent(channel_name, "Receive failed: " + ex.Message));
                     Disconnect(true);
@@ -514,6 +526,7 @@ namespace Smpp
             lock (SessionLock)
             {
                 var now = DateTime.UtcNow;
+                ExpireDeliveryTracking(now);
                 multipart_messages.RemoveAll(part => now - part.submitted_dt >= MultipartLifetime);
                 if (stopped || tcp_stream == null)
                     return;
@@ -532,7 +545,10 @@ namespace Smpp
                         .Select(pair => pair.Key).ToArray();
                     int id = submitted_messages[sequences[0]].message_id;
                     foreach (uint sequence in sequences)
+                    {
+                        ReportPartResponse(sequence, submitted_messages[sequence], null, "");
                         submitted_messages.Remove(sequence);
+                    }
                     if (!submission.Completed)
                     {
                         submission.Completed = true;
@@ -551,9 +567,14 @@ namespace Smpp
                 pendingBindSequence = null;
                 enquire_link_timer.Stop();
                 timeout_timer.Stop();
-                var stream = tcp_stream;
+                var stream = sessionStream;
                 var client = tcp_client;
                 tcp_stream = null;
+                sessionStream = null;
+                if (sessionCancellation != null)
+                    _ = CancelSessionAsync(sessionCancellation);
+                sessionCancellation = null;
+                pendingAcknowledgements.Clear();
                 tcp_client = null;
                 sessionGeneration++;
                 stream?.Dispose();
@@ -563,6 +584,8 @@ namespace Smpp
                 // Already-ACKed segments must survive transient disconnects until their lifetime expires.
                 var pending = submitted_messages.Values.Where(message => !message.submission.Completed)
                     .Select(message => message.message_id).Distinct().ToArray();
+                foreach (var pair in submitted_messages)
+                    ReportPartResponse(pair.Key, pair.Value, null, "");
                 submitted_messages.Clear();
                 if (reconnect)
                     ScheduleReconnect();
@@ -581,8 +604,8 @@ namespace Smpp
                 try
                 {
                     // Serialize complete frames; in particular, finish unbind_resp before closing.
-                    tcp_stream.WriteTimeout = timeout;
-                    tcp_stream.Write(bytes, 0, bytes.Length);
+                    sessionStream.WriteTimeout = timeout;
+                    sessionStream.Write(bytes, 0, bytes.Length);
                     return 0;
                 }
                 catch (Exception ex) when (ex is System.IO.IOException || ex is ObjectDisposedException || ex is SocketException)
@@ -669,6 +692,7 @@ namespace Smpp
                 return;
             submitted_messages.Remove(sequence);
             var submission = message.submission;
+            ReportPartResponse(sequence, message, status, messageId ?? "");
             submission.Remaining--;
             if (sequence == submission.FirstSequence)
                 submission.ResponseId = messageId ?? "";
@@ -745,57 +769,77 @@ namespace Smpp
                         commands_queue.Remove(sequence);
                     break;
                 case Common.CommandId.submit_sm:
-                    var submit = new SubmitSm(pdu) { Is8bit = use8bit };
-                    if (use8bit)
+                    var submit = new SubmitSm(pdu) { Is8bit = use8bit, UseGsm7 = UseGsm7 };
+                    if (use8bit || UseGsm7)
                         submit.Decode();
-                    var submitResponse = new SubmitSmResp { sequence_number = sequence, MessageID = Guid.NewGuid().ToString("n") };
-                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [submit_sm_resp]"));
-                    SendPDU(submitResponse.Encode());
-                    if (submit.isMultipart)
+                    DispatchInbound(submit, submit.Sender, submit.Recipient, submit.Body, submit.BodyFormat,
+                        submit.RegisteredDelivery, submit.isMultipart ? submit.MultipartMessage : null, null,
+                        ack => new SubmitSmResp { sequence_number = sequence, command_status = ack.CommandStatus, MessageID = ack.MessageId }.Encode(),
+                        id =>
                     {
-                        if (!TryAssemble(submit.MultipartMessage, out var assembledSubmit))
-                            break;
-                        submit.Body = assembledSubmit;
-                    }
-                    Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + submit.Sender + " to " + submit.Recipient));
-                    Notify(() => Events.LogNewMessageEvent(channel_name, submitResponse.MessageID, submit.Sender, submit.Recipient,
-                        submit.Body, submit.BodyFormat, submit.RegisteredDelivery));
+                        if (submit.isMultipart)
+                        {
+                            if (!TryAssemble(submit.MultipartMessage, out var assembled))
+                                return;
+                            submit.Body = assembled;
+                        }
+                        Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + submit.Sender + " to " + submit.Recipient));
+                        Notify(() => Events.LogNewMessageEvent(channel_name, id, submit.Sender, submit.Recipient,
+                            submit.Body, submit.BodyFormat, submit.RegisteredDelivery));
+                    });
                     break;
                 case Common.CommandId.deliver_sm:
-                    var deliver = new DeliverSm(pdu) { Is8bit = use8bit };
+                    var deliver = new DeliverSm(pdu) { Is8bit = use8bit, UseGsm7 = UseGsm7 };
                     deliver.Decode();
-                    var deliverResponse = new DeliverSmResp { sequence_number = sequence, MessageID = Guid.NewGuid().ToString("n") };
-                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [deliver_sm_resp]"));
-                    SendPDU(deliverResponse.Encode());
-                    if (deliver.isMultipart)
+                    bool deliverReceipt = (deliver.ESMClass & 0x3C) == 4;
+                    var parsedReceipt = deliverReceipt ? DeliveryReceiptParser.Parse(channel_name, deliver.Body, deliver.tlv) : null;
+                    DispatchInbound(deliver, deliver.Sender, deliver.Recipient, deliver.Body, deliver.BodyFormat,
+                        deliver.RegisteredDelivery, deliver.isMultipart ? deliver.MultipartMessage : null, parsedReceipt,
+                        ack => new DeliverSmResp { sequence_number = sequence, command_status = ack.CommandStatus, MessageID = ack.MessageId }.Encode(),
+                        id =>
                     {
-                        if (!TryAssemble(deliver.MultipartMessage, out var assembledDeliver))
-                            break;
-                        deliver.Body = assembledDeliver;
-                    }
-                    if ((deliver.ESMClass & 0x3C) == 4)
-                    {
-                        ReportDelivery(deliver);
-                        break;
-                    }
-                    Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + deliver.Sender + " to " + deliver.Recipient));
-                    Notify(() => Events.LogNewMessageEvent(channel_name, deliverResponse.MessageID, deliver.Sender, deliver.Recipient,
-                        deliver.Body, deliver.BodyFormat, deliver.RegisteredDelivery));
+                        if (deliver.isMultipart)
+                        {
+                            if (!TryAssemble(deliver.MultipartMessage, out var assembled))
+                                return;
+                            deliver.Body = assembled;
+                        }
+                        if (deliverReceipt)
+                            ReportDelivery(deliver.Body, deliver.tlv);
+                        else
+                        {
+                            Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + deliver.Sender + " to " + deliver.Recipient));
+                            Notify(() => Events.LogNewMessageEvent(channel_name, id, deliver.Sender, deliver.Recipient,
+                                deliver.Body, deliver.BodyFormat, deliver.RegisteredDelivery));
+                        }
+                    });
                     break;
                 case Common.CommandId.data_sm:
-                    var data = new DataSm(pdu);
-                    var dataResponse = new DataSmResp { sequence_number = sequence, MessageID = Guid.NewGuid().ToString("n") };
-                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [data_sm_resp]"));
-                    SendPDU(dataResponse.Encode());
-                    if (data.isMultipart)
+                    var data = new DataSm(pdu) { UseGsm7 = UseGsm7 };
+                    if (UseGsm7)
+                        data.Decode();
+                    bool dataReceipt = (data.ESMClass & 0x3C) == 4;
+                    var parsedDataReceipt = dataReceipt ? DeliveryReceiptParser.Parse(channel_name, data.Body, data.tlv) : null;
+                    DispatchInbound(data, data.Sender, data.Recipient, data.Body, data.BodyFormat,
+                        data.RegisteredDelivery, data.isMultipart ? data.MultipartMessage : null, parsedDataReceipt,
+                        ack => new DataSmResp { sequence_number = sequence, command_status = ack.CommandStatus, MessageID = ack.MessageId }.Encode(),
+                        id =>
                     {
-                        if (!TryAssemble(data.MultipartMessage, out var assembledData))
-                            break;
-                        data.Body = assembledData;
-                    }
-                    Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + data.Sender + " to " + data.Recipient));
-                    Notify(() => Events.LogNewMessageEvent(channel_name, dataResponse.MessageID, data.Sender, data.Recipient,
-                        data.Body, data.BodyFormat, data.RegisteredDelivery));
+                        if (data.isMultipart)
+                        {
+                            if (!TryAssemble(data.MultipartMessage, out var assembled))
+                                return;
+                            data.Body = assembled;
+                        }
+                        if (dataReceipt)
+                            ReportDelivery(data.Body, data.tlv);
+                        else
+                        {
+                            Notify(() => Events.LogChannelEvent(channel_name, "Message received from " + data.Sender + " to " + data.Recipient));
+                            Notify(() => Events.LogNewMessageEvent(channel_name, id, data.Sender, data.Recipient,
+                                data.Body, data.BodyFormat, data.RegisteredDelivery));
+                        }
+                    });
                     break;
                 case Common.CommandId.submit_sm_resp:
                     CompleteSubmission(sequence, status, new SubmitSmResp(pdu).MessageID);
@@ -832,28 +876,21 @@ namespace Smpp
             }
         }
 
-        private void ReportDelivery(DeliverSm deliver)
+        private void ReportDelivery(string body, SortedList<string, object> parameters)
         {
-            // Reparse after multipart assembly so ID and status can be in different segments.
-            deliver.ParseDeliveryReport();
-            Common.MessageStatus? status = deliver.DeliveryStatus switch
-            {
-                "DELIVR" => Common.MessageStatus.delivered_ACK_received,
-                "EXPIRE" => Common.MessageStatus.ACK_expired,
-                "UNKNOW" => Common.MessageStatus.unknown_recipient,
-                "ACCEPT" => Common.MessageStatus.received_routed,
-                "REJECT" => Common.MessageStatus.rejected,
-                "UNDELI" or "DELETE" => Common.MessageStatus.message_undeliverable,
-                "ENROUT" => Common.MessageStatus.submitted_waiting_for_ACK,
-                _ => null
-            };
-            if (status == null || string.IsNullOrWhiteSpace(deliver.Reference))
+            var receipt = DeliveryReceiptParser.Parse(channel_name, body, parameters);
+            if (receipt == null)
             {
                 Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Delivery report has no valid ID/status"));
                 return;
             }
-            Notify(() => Events.LogChannelEvent(channel_name, "Message ref: " + deliver.Reference + " " + deliver.DeliveryStatus));
-            Notify(() => Events.LogMessageDeliverReportEvent(deliver.Reference, status.Value));
+            string legacyState = receipt.MessageState switch
+            {
+                1 => "ENROUT", 2 => "DELIVR", 3 => "EXPIRE", 4 => "DELETE",
+                5 => "UNDELI", 6 => "ACCEPT", 7 => "UNKNOW", 8 => "REJECT", _ => ""
+            };
+            Notify(() => Events.LogChannelEvent(channel_name, "Message ref: " + receipt.ProviderMessageId + " " + legacyState));
+            ReportReceipt(receipt);
         }
 
         public void SubmitDeliveryReport(string messageId, Common.MessageStatus status)
@@ -883,6 +920,15 @@ namespace Smpp
                 };
                 if (report.Body.Length > Common.SINGLE_ASCII_MESSAGE_LENGTH)
                     report.LargeMessageHandleMethod = 2;
+                if (!string.IsNullOrEmpty(messageId) && messageId.Length <= 64 && messageId.All(value => value > 0 && value < 128))
+                {
+                    report.tlv["001E"] = Common.StringToHex(messageId) + "00";
+                    report.tlv["0427"] = (messageStatus switch
+                    {
+                        "ENROUTE" => 1, "DELIVRD" => 2, "EXPIRED" => 3, "UNDELIV" => 5,
+                        "ACCEPTD" => 6, "REJECTD" => 8, _ => 7
+                    }).ToString("X2");
+                }
                 string pdu = report.EncodeM()[0];
                 Notify(() => Events.LogChannelEvent(channel_name, "Sending [deliver_sm] report", debug ? pdu : ""));
                 SendPDU(pdu);
@@ -904,6 +950,7 @@ namespace Smpp
                     Notify(() => Events.LogChannelEvent(channel_name, "Sending [unbind]"));
                 }
                 Disconnect(false);
+                ClearDeliveryTracking();
                 multipart_messages.Clear();
                 if (is_server)
                 {
@@ -930,7 +977,14 @@ namespace Smpp
                         sequence_number = firstSequenceNumber + (uint)i + 1;
                         return false;
                     }
-                message.submission = new Submission { Remaining = partCount, FirstSequence = firstSequenceNumber };
+                message.submission = new Submission
+                {
+                    Remaining = partCount, FirstSequence = firstSequenceNumber,
+                    MessageId = message.message_id, TrackDelivery = message.registered_delivery && registered_delivery == 1,
+                    Parts = new DeliveryPart[partCount]
+                };
+                for (int i = 0; i < partCount; i++)
+                    message.submission.Parts[i] = new DeliveryPart { Submission = message.submission, Number = i + 1 };
                 for (int i = 0; i < partCount; i++)
                     submitted_messages.Add(firstSequenceNumber + (uint)i, message);
                 sequence_number = firstSequenceNumber + (uint)partCount;
@@ -1016,6 +1070,7 @@ namespace Smpp
         public virtual int SubmitSm(int message_id, string sender, string recipient, string body,
             string body_format = "ascii", bool delivery_report = true)
         {
+            body_format = MessageBodyCodec.SelectFormat(body, body_format);
             return SendMessage(message_id, sender, recipient, delivery_report, "submit_sm", (sequence, reference) =>
                 new SubmitSm
                 {

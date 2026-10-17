@@ -37,6 +37,8 @@ namespace Smpp.Requests
         private string delivery_status;
         protected bool is_8bit;
 
+        public bool UseGsm7 { get; set; }
+
         protected int large_message_handle_method = 1;
 
         protected string multipart_header = "";
@@ -213,6 +215,7 @@ namespace Smpp.Requests
                 switch (data_coding)
                 {
                     case 0:
+                        return UseGsm7 ? "gsm7" : "ascii";
                     case 1:
                         return "ascii";
                     case 2:
@@ -230,6 +233,7 @@ namespace Smpp.Requests
             set
             {
                 data_coding = Common.body_format[value];
+                UseGsm7 = value == "gsm7";
             }
         }
 
@@ -335,7 +339,7 @@ namespace Smpp.Requests
             LoadTLV(tail);
             if (sm_length == 0 && tlv.TryGetValue("0424", out var payload))
                 messageHex = payload.ToString();
-            short_message = MessageBodyCodec.Decode(messageHex, data_coding, esm_class, is_8bit, out multipart_header);
+            short_message = MessageBodyCodec.Decode(messageHex, data_coding, esm_class, is_8bit, out multipart_header, UseGsm7);
             ParseDeliveryReport();
         }
 
@@ -366,13 +370,23 @@ namespace Smpp.Requests
                         _ => ""
                     };
                 }
+                var receipt = DeliveryReceiptParser.Parse("", short_message, tlv);
+                if (receipt != null)
+                {
+                    reference_from = receipt.ProviderMessageId;
+                    delivery_status = receipt.MessageState switch
+                    {
+                        1 => "ENROUT", 2 => "DELIVR", 3 => "EXPIRE", 4 => "DELETE",
+                        5 => "UNDELI", 6 => "ACCEPT", 7 => "UNKNOW", 8 => "REJECT", _ => ""
+                    };
+                }
             }
         }
 
         public virtual string[] EncodeM()
         {
             var encoded = MessageBodyCodec.Encode(short_message, data_coding,
-                large_message_handle_method, split_base_ascii, is_8bit, MultipartSequenceNumber);
+                large_message_handle_method, split_base_ascii, is_8bit, MultipartSequenceNumber, UseGsm7);
             var parts = new string[encoded.Length];
             for (int i = 0; i < encoded.Length; i++)
             {
@@ -386,6 +400,7 @@ namespace Smpp.Requests
                 response.Append(registered_delivery);
                 response.AppendFormat("00{0:X2}00", data_coding);
                 response.Append(part.Field);
+                response.Append(EncodeOptionalParameters(large_message_handle_method == 2, part.Field != "00"));
                 parts[i] = (response.Length / 2 + 4).ToString("X8") + response;
             }
             return parts;

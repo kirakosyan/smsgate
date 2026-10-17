@@ -2,6 +2,8 @@
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.Security;
+using System.Security.Authentication;
 using System.Threading;
 using System.Threading.Tasks;
 using Smpp.Events;
@@ -32,6 +34,7 @@ namespace Smpp
             string body_format = "ascii", bool delivery_report = true)
         {
             bool deliver = use_deliver_sm;
+            body_format = MessageBodyCodec.SelectFormat(body, body_format);
             return SendMessage(message_id, sender, recipient, delivery_report, deliver ? "deliver_sm" : "data_sm",
                 (sequence, reference) =>
                 {
@@ -57,9 +60,16 @@ namespace Smpp
 
         /// <summary>Starts the listener before returning, then accepts sessions in the background.</summary>
         public static void StartAsync(string ip, int port)
+            => StartAsync(ip, port, null);
+
+        /// <summary>Starts an SMPP listener with optional TLS, authenticating TLS before reading bind credentials.</summary>
+        public static void StartAsync(string ip, int port, SslServerAuthenticationOptions tlsOptions)
         {
             if (!IPAddress.TryParse(ip, out var address))
                 throw new ArgumentException("Check IP address", nameof(ip));
+            if (tlsOptions != null && tlsOptions.ServerCertificate == null && tlsOptions.ServerCertificateContext == null &&
+                tlsOptions.ServerCertificateSelectionCallback == null)
+                throw new ArgumentException("TLS listeners require a server certificate or a certificate selection callback.", nameof(tlsOptions));
             lock (ListenerLock)
             {
                 if (running)
@@ -69,13 +79,13 @@ namespace Smpp
                 tcp_server = listener;
                 running = true;
                 listenerCancellation = new CancellationTokenSource();
-                _ = AcceptConnections(listener, listenerCancellation.Token);
+                _ = AcceptConnections(listener, listenerCancellation.Token, tlsOptions);
             }
         }
 
-        private static Task AcceptConnections(TcpListener listener, CancellationToken cancellation) =>
+        private static Task AcceptConnections(TcpListener listener, CancellationToken cancellation, SslServerAuthenticationOptions tlsOptions) =>
             RunAcceptLoop(listener.AcceptTcpClientAsync,
-                client => { _ = CreateConnection(listener, client, cancellation); },
+                client => { _ = CreateConnection(listener, client, cancellation, tlsOptions: tlsOptions); },
                 ex =>
                 {
                     Server[] servers;
@@ -115,15 +125,22 @@ namespace Smpp
         }
 
         internal static async Task CreateConnection(TcpListener listener, TcpClient client,
-            CancellationToken cancellation, int bindTimeoutMilliseconds = 10000)
+            CancellationToken cancellation, int bindTimeoutMilliseconds = 10000, SslServerAuthenticationOptions tlsOptions = null)
         {
             bool accepted = false;
+            System.IO.Stream stream = null;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             deadline.CancelAfter(bindTimeoutMilliseconds);
             try
             {
-                var stream = client.GetStream();
+                stream = client.GetStream();
                 stream.WriteTimeout = 10000;
+                if (tlsOptions != null)
+                {
+                    var secure = new SslStream(stream, false);
+                    stream = secure;
+                    await secure.AuthenticateAsServerAsync(tlsOptions, deadline.Token).ConfigureAwait(false);
+                }
                 var header = new byte[4];
                 await stream.ReadExactlyAsync(header, deadline.Token).ConfigureAwait(false);
                 uint length = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(header);
@@ -175,33 +192,37 @@ namespace Smpp
                     return;
                 }
                 deadline.Token.ThrowIfCancellationRequested();
-                accepted = server.AcceptSession(client, response, command);
+                accepted = server.AcceptSession(client, stream, response, command);
             }
             catch (Exception ex) when (ex is System.IO.IOException || ex is SocketException ||
                 ex is ArgumentException || ex is FormatException || ex is IndexOutOfRangeException ||
-                ex is Smpp.Exceptions.CommandLengthException || ex is ObjectDisposedException || ex is OperationCanceledException)
+                ex is Smpp.Exceptions.CommandLengthException || ex is ObjectDisposedException || ex is OperationCanceledException ||
+                ex is AuthenticationException)
             {
                 // Invalid or incomplete bind frames never become registered sessions.
             }
             finally
             {
                 if (!accepted)
+                {
+                    stream?.Dispose();
                     client.Dispose();
+                }
             }
         }
 
-        private bool AcceptSession(TcpClient client, Pdu response, Common.CommandId command)
+        private bool AcceptSession(TcpClient client, System.IO.Stream stream, Pdu response, Common.CommandId command)
         {
             lock (SessionLock)
             {
                 if (stopped || tcp_stream != null)
                 {
                     response.command_status = 5; // ESME_RALYBND: do not overwrite a live session.
-                    client.GetStream().Write(Common.ConvertHexStringToByteArray(response.Encode()));
+                    stream.Write(Common.ConvertHexStringToByteArray(response.Encode()));
                     return false;
                 }
-                client.GetStream().Write(Common.ConvertHexStringToByteArray(response.Encode()));
-                BeginSession(client, true);
+                stream.Write(Common.ConvertHexStringToByteArray(response.Encode()));
+                BeginSession(client, true, stream);
                 string remote = client.Client.RemoteEndPoint.ToString();
                 Notify(() => Events.LogChannelEvent(channel_name, "Received [" + command + "]"));
                 Notify(() => Events.LogChannelEvent(channel_name, "Logged in successfully IP: " + remote));

@@ -470,6 +470,7 @@ namespace Smpp
             body_format = new SortedList<string, int>();
 
             body_format.Add("ascii", 0);
+            body_format.Add("gsm7", 0);
             body_format.Add("binary", 2);
             body_format.Add("latin", 3);
             body_format.Add("unicode", 8);

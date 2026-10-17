@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Net.Sockets;
+using System.Net.Security;
+using System.Security.Authentication;
 using System.Threading;
 using System.Threading.Tasks;
 using Smpp.Events;
@@ -11,6 +13,9 @@ namespace Smpp
     {
         private CancellationTokenSource connectCancellation;
         private Task<bool> connecting;
+
+        /// <summary>Optional TLS settings. Set TargetHost to the certificate hostname. Null uses plain TCP.</summary>
+        public SslClientAuthenticationOptions TlsOptions { get; set; }
 
         public Client(string channelName, GateEvents events) : base(channelName, events)
         {
@@ -38,6 +43,8 @@ namespace Smpp
                     return connecting;
                 if (!direction_in && !direction_out)
                     throw new InvalidOperationException("At least one connection direction must be enabled.");
+                if (TlsOptions != null && string.IsNullOrWhiteSpace(TlsOptions.TargetHost))
+                    throw new InvalidOperationException("TLS requires a TargetHost for certificate validation.");
                 CancelReconnect();
                 var cancellation = new CancellationTokenSource(timeout);
                 connectCancellation = cancellation;
@@ -56,6 +63,7 @@ namespace Smpp
             var transport = new TcpClient();
             bool installed = false;
             bool retry = false;
+            System.IO.Stream stream = null;
             try
             {
                 await ConnectTransportAsync(transport, cancellation.Token).ConfigureAwait(false);
@@ -68,7 +76,25 @@ namespace Smpp
                         retry = true;
                         return false;
                     }
-                    BeginSession(transport, false);
+                }
+                stream = transport.GetStream();
+                var tls = TlsOptions;
+                if (tls != null)
+                {
+                    var secure = new SslStream(stream, false);
+                    stream = secure;
+                    await secure.AuthenticateAsClientAsync(tls, cancellation.Token).ConfigureAwait(false);
+                }
+                lock (SessionLock)
+                {
+                    if (stopped || !ReferenceEquals(connectCancellation, cancellation))
+                        return false;
+                    if (cancellation.IsCancellationRequested)
+                    {
+                        retry = true;
+                        return false;
+                    }
+                    BeginSession(transport, false, stream);
                     installed = true;
                     Notify(() => Events.LogChannelEvent(channel_name, "Connected to " + host + ":" + port));
                     int result;
@@ -105,20 +131,24 @@ namespace Smpp
                     return true;
                 }
             }
-            catch (Exception ex) when (ex is SocketException || ex is OperationCanceledException || ex is ObjectDisposedException)
+            catch (Exception ex) when (ex is SocketException || ex is OperationCanceledException || ex is ObjectDisposedException ||
+                ex is System.IO.IOException || ex is AuthenticationException)
             {
                 lock (SessionLock)
                 {
                     retry = !stopped;
                     if (retry)
-                        Notify(() => Events.LogChannelEvent(channel_name, "Unable to connect to host: " + host + ":" + port));
+                        Notify(() => Events.LogChannelEvent(channel_name, "Unable to connect to host: " + host + ":" + port + " - " + ex.Message));
                 }
                 return false;
             }
             finally
             {
                 if (!installed)
+                {
+                    stream?.Dispose();
                     transport.Dispose();
+                }
                 lock (SessionLock)
                 {
                     if (ReferenceEquals(connectCancellation, cancellation))
