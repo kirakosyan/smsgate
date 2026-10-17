@@ -6,8 +6,9 @@ namespace Smpp
     public sealed class DeliveryTrackingStore
     {
         internal object SyncRoot { get; } = new();
+        internal bool ExternallyAssigned;
         internal TimedCache<Connection.DeliveryGroup> Parts { get; } = new();
-        internal TimedCache<DeliveryReceipt> EarlyReceipts { get; } = new();
+        internal TimedCache<Connection.EarlyReceipt> EarlyReceipts { get; } = new();
         internal TimedCache<bool> AmbiguousIds { get; } = new();
         private TimeSpan lifetime = TimeSpan.FromHours(24);
         private int capacity = 10000;

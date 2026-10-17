@@ -37,6 +37,8 @@ namespace Smpp
             internal uint FirstSequence;
             internal string ResponseId = "";
             internal bool Completed;
+            internal bool AggregatesDeferred;
+            internal Common.MessageStatus? LocalFailure;
             internal DeliveryPart[] Parts;
             internal bool DeliveryCompleted;
             internal bool TrackDelivery;
@@ -274,6 +276,8 @@ namespace Smpp
         {
             channel_name = channelName;
             Events = events ?? throw new ArgumentNullException(nameof(events));
+            // Publish instruments during construction, before protocol/store locks can be held.
+            _ = SmppDiagnostics.Meter;
             sequence_number = 1;
             connected = false;
 
@@ -320,7 +324,7 @@ namespace Smpp
                 if (dispatchingNotifications)
                     return;
                 dispatchingNotifications = true;
-                _ = Task.Run(DispatchNotifications);
+                _ = RunDetached(DispatchNotifications);
             }
         }
 
@@ -546,22 +550,7 @@ namespace Smpp
                 var expired = submitted_messages.Values
                     .Where(message => (now - message.submitted_time).TotalMilliseconds >= timeout)
                     .Select(message => message.submission).Distinct().ToArray();
-                foreach (var submission in expired)
-                {
-                    var sequences = submitted_messages.Where(pair => ReferenceEquals(pair.Value.submission, submission))
-                        .Select(pair => pair.Key).ToArray();
-                    int id = submitted_messages[sequences[0]].message_id;
-                    foreach (uint sequence in sequences)
-                    {
-                        ReportPartResponse(sequence, submitted_messages[sequence], null, "");
-                        submitted_messages.Remove(sequence);
-                    }
-                    if (!submission.Completed)
-                    {
-                        submission.Completed = true;
-                        Notify(() => Events.LogMessageChangeStatusEvent(id, Common.MessageStatus.timeout));
-                    }
-                }
+                foreach (var submission in expired) ExpireSubmission(submission);
                 // The timer remains active after a healthy tick, including while idle.
             }
         }
@@ -571,7 +560,7 @@ namespace Smpp
             lock (SessionLock)
             {
                 connected = false;
-                ChangeState(stopped ? ConnectionState.Stopped : reconnect ? ConnectionState.Reconnecting : ConnectionState.Disconnected);
+                ChangeState(stopped ? ConnectionState.Stopped : reconnect && !is_server ? ConnectionState.Reconnecting : ConnectionState.Disconnected);
                 bindCompletion?.TrySetResult(new BindResult(false, null));
                 pendingBindSequence = null;
                 enquire_link_timer.Stop();
@@ -591,15 +580,14 @@ namespace Smpp
                 commands_queue.Clear();
                 _partial_pdu = "";
                 // Already-ACKed segments must survive transient disconnects until their lifetime expires.
-                var pending = submitted_messages.Values.Where(message => !message.submission.Completed)
-                    .Select(message => message.message_id).Distinct().ToArray();
-                foreach (var pair in submitted_messages)
-                    ReportPartResponse(pair.Key, pair.Value, null, "");
-                submitted_messages.Clear();
-                if (reconnect)
-                    ScheduleReconnect();
-                foreach (int id in pending)
-                    Notify(() => Events.LogMessageChangeStatusEvent(id, Common.MessageStatus.timeout));
+                var timeoutIds = new HashSet<int>();
+                foreach (var submission in submitted_messages.Values.Select(message => message.submission).Distinct().ToArray())
+                {
+                    // The legacy disconnect event is once per application ID, even for separately tracked PDUs.
+                    if (!submission.Completed && !timeoutIds.Add(submission.MessageId)) submission.Completed = true;
+                    ExpireSubmission(submission);
+                }
+                if (reconnect) ScheduleReconnect();
             }
         }
 
@@ -698,28 +686,34 @@ namespace Smpp
             }
         }
 
-        private void CompleteSubmission(uint sequence, uint status, string messageId)
+        private void CompleteSubmission(uint sequence, uint? status, string messageId)
         {
-            if (!submitted_messages.TryGetValue(sequence, out var message))
-                return;
+            if (!submitted_messages.TryGetValue(sequence, out var message)) return;
             submitted_messages.Remove(sequence);
             var submission = message.submission;
-            ReportPartResponse(sequence, message, status, messageId ?? "");
             submission.Remaining--;
-            if (sequence == submission.FirstSequence)
-                submission.ResponseId = messageId ?? "";
-            if (submission.Completed)
-                return;
-            if (status != 0)
-            {
-                submission.Completed = true;
-                Notify(() => Events.LogMessageChangeStatusEvent(message.message_id, Common.MessageStatus.rejected, messageId ?? ""));
-            }
-            else if (submission.Remaining == 0)
-            {
-                submission.Completed = true;
-                Notify(() => Events.LogMessageChangeStatusEvent(message.message_id, Common.MessageStatus.sent, submission.ResponseId));
-            }
+            if (sequence == submission.FirstSequence) submission.ResponseId = messageId ?? "";
+            ReportPartResponse(sequence, message, status, messageId ?? "");
+            PublishSubmissionStatus(submission);
+        }
+
+        private void PublishSubmissionStatus(Submission submission)
+        {
+            if (submission.Completed || submission.AggregatesDeferred) return;
+            var failed = submission.Parts.Select(part => part.Response).FirstOrDefault(response => response != null && response.CommandStatus != 0);
+            var status = submission.LocalFailure ?? failed?.Status;
+            if (status == null && submission.Remaining != 0) return;
+            submission.Completed = true;
+            Notify(() => Events.LogMessageChangeStatusEvent(submission.MessageId, status ?? Common.MessageStatus.sent,
+                failed?.ProviderMessageId ?? submission.ResponseId));
+        }
+
+        // Timer sweep, per-PDU deadline, disconnect, and unsent cancellation share bookkeeping.
+        private void ExpireSubmission(Submission submission, bool unsentOnly = false)
+        {
+            var sequences = submitted_messages.Where(pair => ReferenceEquals(pair.Value.submission, submission) &&
+                (!unsentOnly || pair.Value.submitted_time == DateTime.MaxValue)).Select(pair => pair.Key).ToArray();
+            foreach (uint sequence in sequences) CompleteSubmission(sequence, null, "");
         }
 
         private bool TryAssemble(Common.MultipartMessage part, out string body)
@@ -913,7 +907,10 @@ namespace Smpp
                 string messageStatus = DeliveryReceiptParser.StateText(state);
                 var report = new DeliverSm(Events)
                 {
-                    sequence_number = NextSequenceNumber(), Sender = "", Recipient = "", BodyFormat = "ascii",
+                    sequence_number = NextSequenceNumber(),
+                    Sender = "",
+                    Recipient = "",
+                    BodyFormat = "ascii",
                     IsDeliveryReport = true,
                     Body = "id:" + messageId + " sub:001 dlvrd:" + (messageStatus == "DELIVRD" ? "001" : "000") +
                         " submit date:" + DateTime.UtcNow.ToString("yyMMddHHmm") +
@@ -978,8 +975,11 @@ namespace Smpp
                     }
                 message.submission = new Submission
                 {
-                    Remaining = partCount, FirstSequence = firstSequenceNumber, Owner = this,
-                    MessageId = message.message_id, TrackDelivery = message.registered_delivery && registered_delivery == 1,
+                    Remaining = partCount,
+                    FirstSequence = firstSequenceNumber,
+                    Owner = this,
+                    MessageId = message.message_id,
+                    TrackDelivery = message.registered_delivery && registered_delivery == 1,
                     Parts = new DeliveryPart[partCount]
                 };
                 for (int i = 0; i < partCount; i++)
@@ -1017,51 +1017,78 @@ namespace Smpp
                     Notify(() => Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.queued));
                     return 2;
                 }
-                multipart_sequence_number = multipart_sequence_number == 255 ? (byte)1 : (byte)(multipart_sequence_number + 1);
-                firstSequence = sequence_number;
-                parts = encode(firstSequence, multipart_sequence_number);
-                uint available = FindAvailableSequenceRange(parts.Length);
-                if (firstSequence != available)
-                {
-                    firstSequence = available;
-                    parts = encode(firstSequence, multipart_sequence_number);
-                }
-                var message = new submitted_message
-                {
-                    message_id = messageId, submitted_time = DateTime.MaxValue, registered_delivery = deliveryReport && commandName != "deliver_sm"
-                };
-                if (!TryTrackSubmittedMessages(firstSequence, parts.Length, message))
+                if (!AllocateSubmission(messageId, sender, recipient, deliveryReport, commandName, encode, null, false,
+                    out parts, out firstSequence, out _))
                 {
                     Notify(() => Events.LogMessageChangeStatusEvent(messageId, Common.MessageStatus.queued));
                     return 3;
                 }
                 sent_during_last_second++;
                 generation = sessionGeneration;
-                Notify(() => Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient));
-                Notify(() => Events.LogMessageChangeStatusEvent(messageId, registered_delivery == 1 && deliveryReport
-                    ? Common.MessageStatus.submitted_waiting_for_ACK : Common.MessageStatus.received_routed));
             }
             for (int i = 0; i < parts.Length; i++)
             {
                 lock (SessionLock)
                 {
-                    if (!connected || generation != sessionGeneration)
-                        return 1;
-                    uint sequence = firstSequence + (uint)i;
-                    if (!submitted_messages.TryGetValue(sequence, out var message))
-                        return 1; // This submission expired while waiting to send its next segment.
-                    message.submitted_time = DateTime.UtcNow;
-                    submitted_messages[sequence] = message;
-                    string pdu = parts[i];
-                    Notify(() => Events.LogChannelEvent(channel_name, "Sending [" + commandName + "]", debug ? pdu : ""));
-                    int result = SendPDU(parts[i]);
-                    if (result != 0)
-                        return result;
+                    int result = SendTrackedPart(firstSequence + (uint)i, parts[i], generation, commandName);
+                    if (result != 0) return result;
                 }
                 if (i + 1 < parts.Length && multypart_delay > 0)
                     Thread.Sleep(multypart_delay);
             }
             return 0;
+        }
+
+        private bool AllocateSubmission(int messageId, string sender, string recipient, bool deliveryReport,
+            string commandName, Func<uint, byte, string[]> encode, int? expectedParts, bool deferAggregates,
+            out string[] parts, out uint firstSequence, out Submission submission)
+        {
+            submission = null;
+            multipart_sequence_number = multipart_sequence_number == 255 ? (byte)1 : (byte)(multipart_sequence_number + 1);
+            firstSequence = expectedParts.HasValue ? FindAvailableSequenceRange(expectedParts.Value) : sequence_number;
+            parts = encode(firstSequence, multipart_sequence_number);
+            if (expectedParts.HasValue && parts.Length != expectedParts.Value)
+                throw new InvalidOperationException("Connection encoding settings changed while a message was queued.");
+            if (!expectedParts.HasValue)
+            {
+                uint available = FindAvailableSequenceRange(parts.Length);
+                if (available != firstSequence) parts = encode(firstSequence = available, multipart_sequence_number);
+            }
+            var message = new submitted_message
+            {
+                message_id = messageId,
+                submitted_time = DateTime.MaxValue,
+                registered_delivery = deliveryReport && commandName != "deliver_sm"
+            };
+            if (!TryTrackSubmittedMessages(firstSequence, parts.Length, message)) return false;
+            submission = submitted_messages[firstSequence].submission;
+            submission.AggregatesDeferred = deferAggregates;
+            Notify(() => Events.LogChannelEvent(channel_name, "Sending from " + sender + " to " + recipient));
+            Notify(() => Events.LogMessageChangeStatusEvent(messageId, registered_delivery == 1 && deliveryReport
+                ? Common.MessageStatus.submitted_waiting_for_ACK : Common.MessageStatus.received_routed));
+            return true;
+        }
+
+        private int SendTrackedPart(uint sequence, string pdu, int generation, string commandName, AsyncPart asyncPart = null, SendWork work = null)
+        {
+            if (!connected || generation != sessionGeneration || !submitted_messages.TryGetValue(sequence, out var message)) return 1;
+            message.submitted_time = DateTime.UtcNow;
+            submitted_messages[sequence] = message;
+            if (asyncPart != null)
+            {
+                asyncPart.HasSlot = asyncPart.Sent = true;
+                work.AttemptSent = true;
+                Measure(SmppDiagnostics.InFlight, 1);
+            }
+            Notify(() => Events.LogChannelEvent(channel_name, "Sending [" + commandName + "]", debug ? pdu : ""));
+            int result = SendPDU(pdu);
+            if (asyncPart != null && result == 0)
+            {
+                Measure(SmppDiagnostics.Sent, 1);
+                Diagnose("pdu.sent", sequence);
+                _ = ExpireAsyncPartAsync(sequence, asyncPart);
+            }
+            return result;
         }
 
         protected virtual void CancelConnectionAttempt() { }
@@ -1080,10 +1107,19 @@ namespace Smpp
             return
                 new SubmitSm
                 {
-                    sequence_number = sequence, MultipartSequenceNumber = reference,
-                    Sender = message.Sender, Recipient = message.Recipient, Body = message.Body, BodyFormat = body_format,
-                    Is8bit = use8bit, ServiceType = system_type, SourceAddrTON = source_ton, SourceAddrNPI = source_npi,
-                    DestAddrTON = destination_ton, DestAddrNPI = destination_npi, SplitBaseASCII = split_base_ascii,
+                    sequence_number = sequence,
+                    MultipartSequenceNumber = reference,
+                    Sender = message.Sender,
+                    Recipient = message.Recipient,
+                    Body = message.Body,
+                    BodyFormat = body_format,
+                    Is8bit = use8bit,
+                    ServiceType = system_type,
+                    SourceAddrTON = source_ton,
+                    SourceAddrNPI = source_npi,
+                    DestAddrTON = destination_ton,
+                    DestAddrNPI = destination_npi,
+                    SplitBaseASCII = split_base_ascii,
                     RegisteredDelivery = registered_delivery == 1 && message.RequestDeliveryReport ? 1 : 0,
                     LargeMessageHandleMethod = large_message
                 }.EncodeM();

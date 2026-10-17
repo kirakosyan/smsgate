@@ -175,7 +175,10 @@ namespace Smpp
                     }
                     cancellation.Dispose();
                     if (retry)
+                    {
+                        ChangeState(stopped ? ConnectionState.Stopped : ConnectionState.Reconnecting);
                         ScheduleReconnect();
+                    }
                 }
             }
         }

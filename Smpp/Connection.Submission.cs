@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
+using Smpp.Events;
 using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
@@ -34,6 +34,10 @@ namespace Smpp
             internal CancellationToken Cancellation;
             internal bool Started;
             internal int PartCount;
+            internal ActivityContext ParentContext;
+            internal Submission CurrentSubmission;
+            internal bool AttemptSent;
+            internal int AttemptNumber;
             internal readonly TaskCompletionSource<SubmissionResult> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
         /// <summary>Limits for SubmitAsync. Set before the first asynchronous submission. Legacy SubmitSm remains a direct send.</summary>
@@ -62,7 +66,7 @@ namespace Smpp
             ArgumentNullException.ThrowIfNull(message.Recipient);
             // Validate encoding before admitting work so malformed input is never silently queued.
             int partCount = EncodeSubmission(message, 1, 1).Length;
-            var work = new SendWork { Message = message, Cancellation = cancellationToken, PartCount = partCount };
+            var work = new SendWork { Message = message, Cancellation = cancellationToken, PartCount = partCount, ParentContext = Activity.Current?.Context ?? default };
             lock (SessionLock)
             {
                 if (stopped || draining) return EmptyResult(message, SubmissionOutcome.Stopped);
@@ -74,12 +78,12 @@ namespace Smpp
                     pduSlots = new(submissionOptions.MaxInFlightPdus, submissionOptions.MaxInFlightPdus);
                     sendQueue = Channel.CreateBounded<SendWork>(new BoundedChannelOptions(submissionOptions.QueueCapacity)
                     { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
-                    sendWorker = Task.Run(RunSendQueueAsync);
+                    sendWorker = RunDetached(RunSendQueueAsync);
                 }
-                SmppDiagnostics.Queue.Add(1);
+                Measure(SmppDiagnostics.Queue, 1);
                 if (!sendQueue.Writer.TryWrite(work))
                 {
-                    SmppDiagnostics.Queue.Add(-1);
+                    Measure(SmppDiagnostics.Queue, -1);
                     return EmptyResult(message, SubmissionOutcome.QueueFull);
                 }
             }
@@ -101,7 +105,7 @@ namespace Smpp
                 {
                     await jobs.WaitAsync(submissionShutdown.Token).ConfigureAwait(false);
                     if (!sendQueue.Reader.TryRead(out var work)) { jobs.Release(); continue; }
-                    SmppDiagnostics.Queue.Add(-1);
+                    Measure(SmppDiagnostics.Queue, -1);
                     running.RemoveWhere(task => task.IsCompleted);
                     running.Add(RunWorkAsync(work, jobs));
                 }
@@ -111,7 +115,7 @@ namespace Smpp
             {
                 while (sendQueue.Reader.TryRead(out var work))
                 {
-                    SmppDiagnostics.Queue.Add(-1);
+                    Measure(SmppDiagnostics.Queue, -1);
                     work.Completion.TrySetResult(EmptyResult(work.Message, SubmissionOutcome.Stopped));
                 }
                 await Task.WhenAll(running).ConfigureAwait(false);
@@ -129,11 +133,16 @@ namespace Smpp
                     work.Started = true;
                 }
                 using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(work.Cancellation, submissionShutdown.Token);
-                using var activity = SmppDiagnostics.ActivitySource.StartActivity("smpp.submit");
+                using var activity = SmppDiagnostics.ActivitySource.StartActivity("smpp.submit", ActivityKind.Producer, work.ParentContext);
                 activity?.SetTag("smpp.channel", channel_name);
                 for (int attempt = 1; attempt <= submissionOptions.MaxThrottleRetries + 1; attempt++)
                 {
-                    result = (await SendAttemptAsync(work.Message, work.PartCount, cancellation.Token).ConfigureAwait(false)) with { Attempts = attempt };
+                    lock (SessionLock)
+                    {
+                        work.AttemptSent = false;
+                        work.AttemptNumber = attempt;
+                    }
+                    result = (await SendAttemptAsync(work, cancellation.Token).ConfigureAwait(false)) with { Attempts = attempt };
                     // Retry only when every PDU was explicitly rejected as throttled. Partial/unknown outcomes are never retried.
                     if (attempt > submissionOptions.MaxThrottleRetries || result.Parts.Count == 0 ||
                         result.Parts.Any(part => part.CommandStatus != 0x58) || result.Outcome != SubmissionOutcome.Rejected) break;
@@ -141,23 +150,34 @@ namespace Smpp
                     await Task.Delay(submissionOptions.ThrottleRetryDelay * attempt, cancellation.Token).ConfigureAwait(false);
                 }
                 activity?.SetTag("smpp.outcome", result.Outcome.ToString());
-                work.Completion.TrySetResult(result);
+
             }
             catch (OperationCanceledException)
             {
-                work.Completion.TrySetResult((result ?? EmptyResult(work.Message, SubmissionOutcome.Cancelled)) with
-                { Outcome = stopped ? SubmissionOutcome.Stopped : SubmissionOutcome.Cancelled });
+                result = (result ?? EmptyResult(work.Message, SubmissionOutcome.Cancelled)) with
+                { Outcome = stopped ? SubmissionOutcome.Stopped : SubmissionOutcome.Cancelled };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 Diagnose("submission.failed");
-                work.Completion.TrySetResult(EmptyResult(work.Message, SubmissionOutcome.Unknown) with { MayHaveBeenAccepted = true });
+                Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Submission failed: " + ex.Message));
+                result = EmptyResult(work.Message, work.AttemptSent ? SubmissionOutcome.Unknown : SubmissionOutcome.Failed) with
+                { MayHaveBeenAccepted = work.AttemptSent, ErrorMessage = ex.Message, Attempts = work.AttemptNumber };
             }
-            finally { jobs.Release(); }
+            finally
+            {
+                if (result != null)
+                {
+                    FinishWorkAggregates(work, result);
+                    work.Completion.TrySetResult(result);
+                }
+                jobs.Release();
+            }
         }
 
-        private async Task<SubmissionResult> SendAttemptAsync(OutboundMessage request, int partCount, CancellationToken token)
+        private async Task<SubmissionResult> SendAttemptAsync(SendWork work, CancellationToken token)
         {
+            var request = work.Message;
             uint first = 0;
             int generation;
             string[] frames;
@@ -166,17 +186,13 @@ namespace Smpp
             {
                 if (stopped || !connected) return EmptyResult(request, stopped ? SubmissionOutcome.Stopped : SubmissionOutcome.NotConnected);
                 token.ThrowIfCancellationRequested();
-                multipart_sequence_number = multipart_sequence_number == 255 ? (byte)1 : (byte)(multipart_sequence_number + 1);
-                first = FindAvailableSequenceRange(partCount);
-                frames = EncodeSubmission(request, first, multipart_sequence_number);
-                if (frames.Length != partCount) throw new InvalidOperationException("Connection encoding settings changed while a message was queued.");
-                var tracked = new submitted_message
-                {
-                    message_id = request.MessageId,
-                    submitted_time = DateTime.MaxValue,
-                    registered_delivery = request.RequestDeliveryReport && SubmissionCommand != "deliver_sm"
-                };
-                if (!TryTrackSubmittedMessages(first, frames.Length, tracked)) return EmptyResult(request, SubmissionOutcome.QueueFull);
+                if (!AllocateSubmission(request.MessageId, request.Sender, request.Recipient, request.RequestDeliveryReport, SubmissionCommand,
+                    (sequence, reference) => EncodeSubmission(request, sequence, reference), work.PartCount, true,
+                    out frames, out first, out var submission))
+                    throw new InvalidOperationException("Unable to reserve SMPP sequences.");
+                // Abandon a wholly throttled attempt only after its replacement has been allocated.
+                if (work.CurrentSubmission != null) work.CurrentSubmission.Completed = work.CurrentSubmission.DeliveryCompleted = true;
+                work.CurrentSubmission = submission;
                 responses = new AsyncPart[frames.Length];
                 for (int i = 0; i < frames.Length; i++) asyncParts.Add(first + (uint)i, responses[i] = new AsyncPart());
                 generation = sessionGeneration;
@@ -187,28 +203,17 @@ namespace Smpp
                 for (int i = 0; i < frames.Length; i++)
                 {
                     await pduSlots.WaitAsync(token).ConfigureAwait(false);
-                    bool transferred = false;
                     try
                     {
                         await WaitForRateAsync(token).ConfigureAwait(false);
                         lock (SessionLock)
                         {
                             token.ThrowIfCancellationRequested();
-                            if (!connected || generation != sessionGeneration) break;
-                            uint sequence = first + (uint)i;
-                            if (!submitted_messages.TryGetValue(sequence, out var tracked)) break;
-                            tracked.submitted_time = DateTime.UtcNow;
-                            submitted_messages[sequence] = tracked;
-                            responses[i].HasSlot = responses[i].Sent = true;
-                            transferred = true;
-                            SmppDiagnostics.InFlight.Add(1);
-                            if (SendPDU(frames[i]) != 0) break;
-                            SmppDiagnostics.Sent.Add(1);
-                            Diagnose("pdu.sent", sequence);
-                            _ = ExpireAsyncPartAsync(sequence, responses[i]);
+                            int writeResult = SendTrackedPart(first + (uint)i, frames[i], generation, SubmissionCommand, responses[i], work);
+                            if (writeResult != 0) break;
                         }
                     }
-                    finally { if (!transferred) pduSlots.Release(); }
+                    finally { if (!responses[i].HasSlot) pduSlots.Release(); }
                 }
                 RemoveUnsentParts();
                 await Task.WhenAll(responses.Select(part => part.Completion.Task)).WaitAsync(token).ConfigureAwait(false);
@@ -228,16 +233,24 @@ namespace Smpp
 
             void RemoveUnsentParts()
             {
-                lock (SessionLock)
-                    for (int i = 0; i < frames.Length; i++)
-                    {
-                        uint sequence = first + (uint)i;
-                        if (!responses[i].Sent && submitted_messages.TryGetValue(sequence, out var tracked))
-                        {
-                            submitted_messages.Remove(sequence);
-                            ReportPartResponse(sequence, tracked, null, "");
-                        }
-                    }
+                lock (SessionLock) ExpireSubmission(work.CurrentSubmission, unsentOnly: true);
+            }
+        }
+
+        private void FinishWorkAggregates(SendWork work, SubmissionResult result)
+        {
+            lock (SessionLock)
+            {
+                var submission = work.CurrentSubmission;
+                if (submission == null) return;
+                submission.AggregatesDeferred = false;
+                if (result.Outcome == SubmissionOutcome.Cancelled || result.Outcome == SubmissionOutcome.Stopped)
+                    submission.LocalFailure = Common.MessageStatus.timeout;
+                else if (result.Outcome == SubmissionOutcome.Failed)
+                    submission.LocalFailure = Common.MessageStatus.generic_error;
+                PublishSubmissionStatus(submission);
+                lock (deliveryTrackingStore.SyncRoot)
+                    if (submission.TrackDelivery && submission.Parts.Any(part => part.Status.HasValue)) PublishDeliveryStatus(submission);
             }
         }
 
@@ -262,20 +275,14 @@ namespace Smpp
                 if (!expected.Completion.Task.IsCompleted && asyncParts.TryGetValue(sequence, out var current) && ReferenceEquals(current, expected) &&
                     submitted_messages.TryGetValue(sequence, out var tracked))
                 {
-                    submitted_messages.Remove(sequence);
-                    ReportPartResponse(sequence, tracked, null, "");
-                    if (!tracked.submission.Completed)
-                    {
-                        tracked.submission.Completed = true;
-                        Notify(() => Events.LogMessageChangeStatusEvent(tracked.message_id, Common.MessageStatus.timeout));
-                    }
+                    ExpireSubmission(tracked.submission);
                 }
         }
 
         private void CompleteAsyncPart(uint sequence, MessagePartStatus result)
         {
             if (!asyncParts.Remove(sequence, out var part)) return;
-            if (part.HasSlot) { SmppDiagnostics.InFlight.Add(-1); pduSlots.Release(); }
+            if (part.HasSlot) { Measure(SmppDiagnostics.InFlight, -1); pduSlots.Release(); }
             part.Completion.TrySetResult(result);
         }
 

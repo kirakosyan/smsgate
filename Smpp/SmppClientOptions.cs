@@ -15,7 +15,7 @@ namespace Smpp
         public string Password { get; init; }
         public bool Receive { get; init; } = true;
         public bool Transmit { get; init; } = true;
-        public bool UseGsm7 { get; init; } = true;
+        public bool UseGsm7 { get; init; }
         public int SourceTon { get; init; }
         public int SourceNpi { get; init; }
         public int DestinationTon { get; init; } = 1;

@@ -29,7 +29,7 @@ else if (args[0] == "client")
 {
     await using var client = new SmppClientOptions
     {
-        Host = "127.0.0.1", Port = port, SystemId = "system", Password = "password",
+        Host = "127.0.0.1", Port = port, SystemId = "system", Password = "password", UseGsm7 = true,
         Submission = new() { MaxThrottleRetries = 1, ThrottleRetryDelay = TimeSpan.FromMilliseconds(20) }
     }.CreateClient(events);
     var delivery = new TaskCompletionSource<MessageDeliveryStatus>(TaskCreationOptions.RunContinuationsAsynchronously);

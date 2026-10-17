@@ -4,6 +4,10 @@ This project uses [Semantic Versioning](https://semver.org/). Released versions 
 
 ## Unreleased
 
+- Retry-safe aggregate status events, isolated per-send trace context, consistent cancellation/expiry bookkeeping, and explicit pre-send failure results.
+- Nonblocking metric dispatch, accurate failed-connect/server states, policy-aware early receipt retention, and complete private-store cleanup.
+- Client options retain the legacy inbound alphabet default; store replacement rejects silently discarded retention settings.
+
 - Bounded `SubmitAsync` queues with PDU rate/window controls, structured results, cancellation, and opt-in retries restricted to explicit whole-attempt throttle rejections.
 - `ConnectAndBindAsync`, validated client options, instance-owned gateways/clients, and graceful draining with sync/async disposal.
 - Shared provider delivery stores for split TX/RX binds, safe shared multipart IDs, tolerant receipt TLVs, configurable ACCEPTD semantics, and ordered retention caches.

@@ -34,7 +34,7 @@ sealed class ExchangeWorker(SmppGateway gateway, IHostApplicationLifetime lifeti
             var client = gateway.AddClient(new SmppClientOptions
             {
                 ChannelName = "provider", Host = "127.0.0.1", Port = port,
-                SystemId = "system", Password = "password",
+                SystemId = "system", Password = "password", UseGsm7 = true,
                 SourceTon = 1, SourceNpi = 1, DestinationTon = 1, DestinationNpi = 1,
                 Submission = new() { PdusPerSecond = 20, MaxInFlightPdus = 5, QueueCapacity = 100 }
             });

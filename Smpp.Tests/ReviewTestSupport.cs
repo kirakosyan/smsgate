@@ -83,7 +83,7 @@ namespace Smpp.Tests
 
         internal static void WritePdu(NetworkStream stream, string hex) => stream.Write(Convert.FromHexString(hex));
 
-        internal sealed class ProbeConnection : Connection
+        internal class ProbeConnection : Connection
         {
             internal int Reconnects;
             internal ProbeConnection(GateEvents events = null) : base("probe", events ?? new GateEvents()) { }
