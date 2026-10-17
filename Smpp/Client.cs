@@ -17,8 +17,12 @@ namespace Smpp
         /// <summary>Optional TLS settings. Set TargetHost to the certificate hostname. Null uses plain TCP.</summary>
         public SslClientAuthenticationOptions TlsOptions { get; set; }
 
-        public Client(string channelName, GateEvents events) : base(channelName, events)
+        public Client(string channelName, GateEvents events) : this(channelName, events, true) { }
+
+        public Client(string channelName, GateEvents events, bool registerWithGate) : base(channelName, events)
         {
+            registeredWithGate = registerWithGate;
+            if (!registerWithGate) return;
             lock (Gate.Clients)
             {
                 if (Gate.Clients.ContainsKey(channelName))
@@ -45,12 +49,25 @@ namespace Smpp
                     throw new InvalidOperationException("At least one connection direction must be enabled.");
                 if (TlsOptions != null && string.IsNullOrWhiteSpace(TlsOptions.TargetHost))
                     throw new InvalidOperationException("TLS requires a TargetHost for certificate validation.");
+                ChangeState(ConnectionState.Connecting);
                 CancelReconnect();
                 var cancellation = new CancellationTokenSource(timeout);
                 connectCancellation = cancellation;
                 connecting = Task.Run(() => ConnectCoreAsync(cancellation));
                 return connecting;
             }
+        }
+
+        /// <summary>Waits for the bind response. Caller cancellation cancels its wait, not a shared connection attempt.</summary>
+        public async Task<BindResult> ConnectAndBindAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!await ConnectAsync().WaitAsync(cancellationToken).ConfigureAwait(false)) return new(false, null);
+            Task<BindResult> binding;
+            lock (SessionLock)
+                binding = connected ? Task.FromResult(new BindResult(true, 0)) : CurrentBindTask;
+            try { return await binding.WaitAsync(TimeSpan.FromMilliseconds(timeout), cancellationToken).ConfigureAwait(false); }
+            catch (TimeoutException) { return new(false, null); }
         }
 
         protected virtual ValueTask ConnectTransportAsync(TcpClient transport, CancellationToken cancellation) =>

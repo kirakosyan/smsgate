@@ -6,7 +6,7 @@
 
 SMSGate is a lightweight, dependency-free SMPP 3.4 client and server library for **.NET 10**. Use its event-driven API to send and receive SMS, process delivery receipts, handle multipart messages, and test SMPP sessions locally.
 
-The development branch also includes opt-in GSM-7 encoding, complete multipart delivery tracking, TLS, and application-controlled acknowledgements. These additions are not in the published 1.0.0 package. See the [provider integration guide](https://github.com/kirakosyan/smsgate/blob/master/docs/PROVIDER_INTEGRATION.md) and the [runnable TLS example](https://github.com/kirakosyan/smsgate/tree/master/examples/ProviderFeatures).
+The development branch also includes opt-in GSM-7 encoding, complete multipart delivery tracking, TLS, and application-controlled acknowledgements. It also provides bounded async submissions, bind results, instance-owned gateways, shared TX/RX tracking, graceful shutdown, and metrics; see the [service integration guide](https://github.com/kirakosyan/smsgate/blob/master/docs/SERVICE_INTEGRATION.md). These additions are not in the published 1.0.0 package. See the [provider integration guide](https://github.com/kirakosyan/smsgate/blob/master/docs/PROVIDER_INTEGRATION.md) and the [runnable TLS example](https://github.com/kirakosyan/smsgate/tree/master/examples/ProviderFeatures).
 
 ## Install
 
@@ -41,6 +41,8 @@ Out of the box, the implementation supports:
 - `Smpp.Tests/` - NUnit-based command and integration tests
 - `examples/LocalExchange/` - a runnable example that consumes the NuGet package
 - `examples/ProviderFeatures/` - validated TLS, GSM-7 multipart delivery, and storage before acknowledgement
+- `examples/WorkerService/` - Generic Host/DI, bounded async sends, and graceful shutdown
+- `examples/InteropPeer/` and `scripts/interop.py` - independent SMPP wire exchange
 
 ## Requirements
 

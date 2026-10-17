@@ -14,7 +14,7 @@ namespace Smpp
     /// <summary>
     /// Base abstract class for server and client connections
     /// </summary>
-    public abstract partial class Connection
+    public abstract partial class Connection : IDisposable, IAsyncDisposable
     {
         protected SortedList<uint, DateTime> commands_queue;
         protected SortedList<uint, submitted_message> submitted_messages;
@@ -41,6 +41,7 @@ namespace Smpp
             internal bool DeliveryCompleted;
             internal bool TrackDelivery;
             internal int MessageId;
+            internal Connection Owner;
         }
 
         protected TcpClient tcp_client;
@@ -298,6 +299,7 @@ namespace Smpp
 
         protected readonly object SessionLock = new object();
         protected bool stopped;
+        protected bool registeredWithGate = true;
         private CancellationTokenSource reconnectCancellation;
         private uint? pendingBindSequence;
         private uint pendingBindResponse;
@@ -312,7 +314,7 @@ namespace Smpp
         // executes under SessionLock, and a slow subscriber cannot stall reads or keepalives.
         protected void Notify(Action notification)
         {
-            lock (SessionLock)
+            lock (notifications)
             {
                 notifications.Enqueue(notification);
                 if (dispatchingNotifications)
@@ -327,7 +329,7 @@ namespace Smpp
             while (true)
             {
                 Action notification;
-                lock (SessionLock)
+                lock (notifications)
                 {
                     if (notifications.Count == 0)
                     {
@@ -374,8 +376,11 @@ namespace Smpp
                                 !ReferenceEquals(reconnectCancellation, cancellation))
                                 return;
                             reconnectCancellation = null;
-                            lock (Gate.Clients)
-                                Gate.Clients.TryGetValue(channel_name, out client);
+                            if (registeredWithGate)
+                            {
+                                lock (Gate.Clients) Gate.Clients.TryGetValue(channel_name, out client);
+                            }
+                            else client = this as Client;
                         }
                         if (ReferenceEquals(client, this))
                             await client.ConnectAsync().ConfigureAwait(false);
@@ -439,6 +444,7 @@ namespace Smpp
             sessionStream.WriteTimeout = timeout;
             sessionCancellation = new CancellationTokenSource();
             connected = bound;
+            ChangeState(bound ? ConnectionState.Bound : ConnectionState.Connected);
             pendingBindSequence = null;
             _partial_pdu = "";
             invalidFraming = false;
@@ -450,6 +456,7 @@ namespace Smpp
         protected int SendBind(Pdu bind, Common.CommandId responseId, string name)
         {
             bind.sequence_number = NextSequenceNumber();
+            bindCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
             pendingBindSequence = bind.sequence_number;
             pendingBindResponse = (uint)responseId;
             commands_queue.Add(bind.sequence_number, DateTime.UtcNow);
@@ -564,6 +571,8 @@ namespace Smpp
             lock (SessionLock)
             {
                 connected = false;
+                ChangeState(stopped ? ConnectionState.Stopped : reconnect ? ConnectionState.Reconnecting : ConnectionState.Disconnected);
+                bindCompletion?.TrySetResult(new BindResult(false, null));
                 pendingBindSequence = null;
                 enquire_link_timer.Stop();
                 timeout_timer.Stop();
@@ -677,10 +686,13 @@ namespace Smpp
             if (status == 0)
             {
                 connected = true;
+                ChangeState(ConnectionState.Bound);
+                bindCompletion?.TrySetResult(new BindResult(true, 0));
                 Notify(() => Events.LogChannelEvent(channel_name, "Bound successfully"));
             }
             else
             {
+                bindCompletion?.TrySetResult(new BindResult(false, status));
                 Notify(() => Events.LogChannelEvent(channel_name, "Bind rejected: " + status));
                 Disconnect(true);
             }
@@ -925,7 +937,9 @@ namespace Smpp
         {
             lock (SessionLock)
             {
+                if (stopped) return;
                 stopped = true;
+                StopSubmissionQueue();
                 CancelReconnect();
                 CancelConnectionAttempt();
                 if (connected)
@@ -964,7 +978,7 @@ namespace Smpp
                     }
                 message.submission = new Submission
                 {
-                    Remaining = partCount, FirstSequence = firstSequenceNumber,
+                    Remaining = partCount, FirstSequence = firstSequenceNumber, Owner = this,
                     MessageId = message.message_id, TrackDelivery = message.registered_delivery && registered_delivery == 1,
                     Parts = new DeliveryPart[partCount]
                 };
@@ -1055,17 +1069,24 @@ namespace Smpp
         public virtual int SubmitSm(int message_id, string sender, string recipient, string body,
             string body_format = "ascii", bool delivery_report = true)
         {
-            body_format = MessageBodyCodec.SelectFormat(body, body_format);
             return SendMessage(message_id, sender, recipient, delivery_report, "submit_sm", (sequence, reference) =>
+                EncodeSubmission(new OutboundMessage(message_id, sender, recipient, body, body_format, delivery_report), sequence, reference));
+        }
+
+        protected virtual string SubmissionCommand => "submit_sm";
+        protected virtual string[] EncodeSubmission(OutboundMessage message, uint sequence, byte reference)
+        {
+            string body_format = MessageBodyCodec.SelectFormat(message.Body, message.BodyFormat);
+            return
                 new SubmitSm
                 {
                     sequence_number = sequence, MultipartSequenceNumber = reference,
-                    Sender = sender, Recipient = recipient, Body = body, BodyFormat = body_format,
+                    Sender = message.Sender, Recipient = message.Recipient, Body = message.Body, BodyFormat = body_format,
                     Is8bit = use8bit, ServiceType = system_type, SourceAddrTON = source_ton, SourceAddrNPI = source_npi,
                     DestAddrTON = destination_ton, DestAddrNPI = destination_npi, SplitBaseASCII = split_base_ascii,
-                    RegisteredDelivery = registered_delivery == 1 && delivery_report ? 1 : 0,
+                    RegisteredDelivery = registered_delivery == 1 && message.RequestDeliveryReport ? 1 : 0,
                     LargeMessageHandleMethod = large_message
-                }.EncodeM());
+                }.EncodeM();
         }
     }
 }

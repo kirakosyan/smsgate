@@ -82,7 +82,7 @@ Receipts can arrive before their submission response. The receipt event then has
 
 Tracking survives transient reconnects. `DeliveryTrackingLifetime` defaults to 24 hours and `MaxTrackedDeliveryParts` to 10,000; the same limit separately bounds unmatched early receipts and ambiguous IDs. Expiration or capacity eviction of unfinished tracked parts produces a terminal `timeout`, indicating that delivery is unknown. A shared provider ID across parts of one submission applies its receipt to all those parts. IDs reused across different submissions within the retention window are treated as ambiguous and produce a tracking error rather than guessed correlation. Explicit `Quit()` expires unfinished tracking and clears it. State is held in memory and does not survive process restarts. Choose retention and capacity for the expected receipt latency and traffic volume.
 
-Tracking currently belongs to each connection. Use a transceiver bind for correlated delivery; separate transmitter and receiver binds cannot correlate across connection instances in this version. A shared provider store is planned for the next pass.
+Tracking uses a connection-local store by default. For separate transmitter and receiver binds, assign one `DeliveryTrackingStore` to both clients before connecting; the [service integration guide](SERVICE_INTEGRATION.md) covers provider scoping and ownership.
 
 The existing `MessageStatusEvent` still reports aggregate submission success using the first segment's ID. The existing `MessageDeliveryReportEvent` still emits provider receipt ID/status pairs. Richer tracking is available through the new events without changing those signatures.
 
@@ -111,6 +111,8 @@ Keepalives and protocol reads continue while a handler awaits storage. Disconnec
 `NewMessageEvent` is emitted after acceptance, once all multipart segments are accepted and assembled. Rejected segments do not enter reassembly. That event and other ordinary events remain observational: exceptions from them do not retract an acknowledgement. With no `InboundMessageHandler`, the original automatic acknowledgement behavior remains.
 
 Storage can succeed while an acknowledgement is lost. Applications must choose their own duplicate detection and retry policy; this API does not provide exactly-once delivery or a built-in durable store.
+
+See the [service integration guide](SERVICE_INTEGRATION.md) for bounded asynchronous submissions, validated options, dependency injection, graceful shutdown, metrics, and independent wire validation.
 
 ## References
 
