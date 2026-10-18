@@ -6,6 +6,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Smpp.Events;
 using Smpp.Requests;
+#if NETFRAMEWORK
+using SslClientAuthenticationOptions = Smpp.SmppTlsClientOptions;
+#endif
 
 namespace Smpp
 {
@@ -98,9 +101,16 @@ namespace Smpp
                 var tls = TlsOptions;
                 if (tls != null)
                 {
+#if NETFRAMEWORK
+                    var secure = new SslStream(stream, false, tls.CertificateValidationCallback);
+                    stream = secure;
+                    await FrameworkAsync.WithCancellation(() => secure.AuthenticateAsClientAsync(tls.TargetHost,
+                        tls.ClientCertificates, tls.EnabledSslProtocols, tls.CheckCertificateRevocation), secure.Dispose, cancellation.Token).ConfigureAwait(false);
+#else
                     var secure = new SslStream(stream, false);
                     stream = secure;
                     await secure.AuthenticateAsClientAsync(tls, cancellation.Token).ConfigureAwait(false);
+#endif
                 }
                 lock (SessionLock)
                 {

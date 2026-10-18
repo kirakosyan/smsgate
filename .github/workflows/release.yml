@@ -41,9 +41,11 @@ jobs:
       - name: Restore
         run: dotnet restore SMSGate.sln -warnaserror
       - name: Debug tests
-        run: dotnet test SMSGate.sln --configuration Debug --no-restore -warnaserror
+        run: dotnet test SMSGate.sln --framework net10.0 --configuration Debug --no-restore -warnaserror
       - name: Release tests
-        run: dotnet test SMSGate.sln --configuration Release --no-restore -warnaserror
+        run: dotnet test SMSGate.sln --framework net10.0 --configuration Release --no-restore -warnaserror
+      - name: Build both package targets
+        run: dotnet build Smpp/Smpp.csproj --configuration Release --no-restore -warnaserror
       - name: Pack
         run: dotnet pack Smpp/Smpp.csproj --configuration Release --no-build --no-restore -warnaserror --output artifacts
       - name: Restore example from the package
@@ -75,8 +77,37 @@ jobs:
             artifacts/*.snupkg
           if-no-files-found: error
 
+  validate-framework:
+    if: github.repository == 'kirakosyan/smsgate' && github.ref_type == 'tag'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+      - name: Framework Debug tests (installed Windows runtime)
+        run: dotnet test Smpp.Tests/Smpp.Tests.csproj --framework net472 --configuration Debug -warnaserror --logger trx --results-directory TestResults/Framework-Debug
+      - name: Framework Release tests (installed Windows runtime)
+        run: dotnet test Smpp.Tests/Smpp.Tests.csproj --framework net472 --configuration Release --no-restore -warnaserror --logger trx --results-directory TestResults/Framework-Release
+      - name: Pack and verify Framework consumer
+        run: |
+          dotnet pack Smpp/Smpp.csproj --configuration Release -warnaserror --output artifacts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:NUGET_PACKAGES = Join-Path $env:RUNNER_TEMP 'smsgate-framework-consumer'
+          $version = dotnet msbuild Smpp/Smpp.csproj -getProperty:Version
+          ./scripts/restore-framework-example.ps1 -PackageDirectory artifacts -Version $version
+          dotnet run --project examples/FrameworkExchange/FrameworkExchange.csproj --configuration Release --no-restore -p:SMSGateVersion=$version
+      - name: Upload Framework runtime reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: framework-test-results
+          path: TestResults/**/*.trx
+          if-no-files-found: error
+
   publish:
-    needs: validate
+    needs: [validate, validate-framework]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: nuget

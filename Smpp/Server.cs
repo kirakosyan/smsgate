@@ -9,6 +9,9 @@ using System.Threading.Tasks;
 using Smpp.Events;
 using Smpp.Requests;
 using Smpp.Responses;
+#if NETFRAMEWORK
+using SslServerAuthenticationOptions = Smpp.SmppTlsServerOptions;
+#endif
 
 namespace Smpp
 {
@@ -68,8 +71,13 @@ namespace Smpp
         {
             if (!IPAddress.TryParse(ip, out var address))
                 throw new ArgumentException("Check IP address", nameof(ip));
-            if (tlsOptions != null && tlsOptions.ServerCertificate == null && tlsOptions.ServerCertificateContext == null &&
+            if (tlsOptions != null && tlsOptions.ServerCertificate == null
+#if !NETFRAMEWORK
+                && tlsOptions.ServerCertificateContext == null &&
                 tlsOptions.ServerCertificateSelectionCallback == null)
+#else
+                )
+#endif
                 throw new ArgumentException("TLS listeners require a server certificate or a certificate selection callback.", nameof(tlsOptions));
             lock (ListenerLock)
             {
@@ -138,9 +146,16 @@ namespace Smpp
                 stream.WriteTimeout = 10000;
                 if (tlsOptions != null)
                 {
+#if NETFRAMEWORK
+                    var secure = new SslStream(stream, false, tlsOptions.CertificateValidationCallback);
+                    stream = secure;
+                    await FrameworkAsync.WithCancellation(() => secure.AuthenticateAsServerAsync(tlsOptions.ServerCertificate,
+                        tlsOptions.ClientCertificateRequired, tlsOptions.EnabledSslProtocols, tlsOptions.CheckCertificateRevocation), secure.Dispose, deadline.Token).ConfigureAwait(false);
+#else
                     var secure = new SslStream(stream, false);
                     stream = secure;
                     await secure.AuthenticateAsServerAsync(tlsOptions, deadline.Token).ConfigureAwait(false);
+#endif
                 }
                 var header = new byte[4];
                 await stream.ReadExactlyAsync(header, deadline.Token).ConfigureAwait(false);
@@ -149,7 +164,11 @@ namespace Smpp
                     return;
                 var bytes = new byte[length];
                 Buffer.BlockCopy(header, 0, bytes, 0, header.Length);
+#if NETFRAMEWORK
+                await FrameworkAsync.ReadExactlyAsync(stream, bytes, header.Length, bytes.Length - header.Length, deadline.Token).ConfigureAwait(false);
+#else
                 await stream.ReadExactlyAsync(bytes.AsMemory(header.Length), deadline.Token).ConfigureAwait(false);
+#endif
                 string pdu = Common.ConvertByteArrayToHexString(bytes);
                 var command = (Common.CommandId)uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber);
                 string login;

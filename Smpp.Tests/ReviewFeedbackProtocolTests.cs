@@ -254,7 +254,7 @@ namespace Smpp.Tests
             using var pair = new SocketPair();
             var stream = pair.Remote.GetStream();
             byte[] bind = Convert.FromHexString(Frame(9, Common.StringToHex("username") + "00000034000000"));
-            await stream.WriteAsync(bind.AsMemory(0, prefixLength));
+            await stream.WriteAsync(bind, 0, prefixLength);
             var watch = Stopwatch.StartNew();
             var handshake = Server.CreateConnection(null, pair.Local, CancellationToken.None, 250);
             var writer = Task.Run(async () =>
@@ -264,7 +264,7 @@ namespace Smpp.Tests
                     for (int i = prefixLength; i < bind.Length; i++)
                     {
                         await Task.Delay(60);
-                        await stream.WriteAsync(bind.AsMemory(i, 1));
+                        await stream.WriteAsync(bind, i, 1);
                     }
                 }
                 catch (IOException) { }
@@ -377,10 +377,14 @@ namespace Smpp.Tests
                 string burst = string.Concat(Enumerable.Repeat(response, 2000)) + response.Substring(0, 20);
                 // Warm up parsing and dispatch before measuring allocations on the parsing thread.
                 connection.MessageHandler(response);
+#if !NETFRAMEWORK
                 long before = GC.GetAllocatedBytesForCurrentThread();
+#endif
                 connection.MessageHandler(burst);
+#if !NETFRAMEWORK
                 long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
                 Assert.That(allocated, Is.LessThan(8_000_000), "Repeatedly copying the unconsumed tail allocates over 100 MB for this burst");
+#endif
                 connection.MessageHandler(response.Substring(20));
                 Assert.That(connection.Reconnects, Is.Zero, "The partial tail must retain its boundary");
             }

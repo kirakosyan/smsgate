@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Text;
 using System.Collections.Generic;
 using Smpp.Events;
@@ -47,7 +47,7 @@ namespace Smpp.Requests
 
         protected int split_base_ascii = Common.ASCII_MESSAGE_SPLIT_BASE;
 
-        public byte MultipartSequenceNumber { get; set; } = (byte)Random.Shared.Next(1, 256);
+        public byte MultipartSequenceNumber { get; set; } = (byte)RuntimeCompatibility.NextMultipartReference();
 
 
         public DeliverSm(GateEvents events)

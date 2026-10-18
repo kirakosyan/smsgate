@@ -67,7 +67,7 @@ namespace Smpp.Tests
         [TestCase(13u)]
         public async Task ConnectAndBindWaitsForTheResponseAndExposesRawRejection(uint status)
         {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            using var listener = new TestTcpListener(IPAddress.Loopback, 0);
             listener.Start();
             using var client = new SmppClientOptions
             {
@@ -90,7 +90,7 @@ namespace Smpp.Tests
         [Test]
         public async Task CancellingBindWaitDoesNotCancelAnotherCallersSharedAttempt()
         {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            using var listener = new TestTcpListener(IPAddress.Loopback, 0);
             listener.Start();
             using var client = new SmppClientOptions
             {
@@ -113,7 +113,7 @@ namespace Smpp.Tests
         [Test]
         public async Task InstanceOwnedClientReconnectsWithoutStaticRegistration()
         {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            using var listener = new TestTcpListener(IPAddress.Loopback, 0);
             listener.Start();
             using var client = new SmppClientOptions
             {

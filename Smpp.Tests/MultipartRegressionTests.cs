@@ -141,7 +141,7 @@ namespace Smpp.Tests
             var parts = Encode(command, body);
             connection.MessageHandler(parts[0]);
             var conflict = Convert.FromHexString(parts[0]);
-            conflict[^1] = (byte)'b';
+            conflict[conflict.Length - 1] = (byte)'b';
             connection.MessageHandler(Convert.ToHexString(conflict));
             var countConflict = Convert.FromHexString(parts[1]);
             countConflict[39] = 3;

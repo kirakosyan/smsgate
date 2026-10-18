@@ -22,12 +22,14 @@ namespace Smpp.Tests
             internal X509Certificate2 Server { get; }
             internal Certificates()
             {
-                using var rootKey = RSA.Create(2048);
+                using var rootKey = RSA.Create();
+                rootKey.KeySize = 2048;
                 var rootRequest = new CertificateRequest("CN=SMSGate test root", rootKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 rootRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
                 rootRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
                 Root = rootRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(2));
-                using var serverKey = RSA.Create(2048);
+                using var serverKey = RSA.Create();
+                serverKey.KeySize = 2048;
                 var request = new CertificateRequest("CN=localhost", serverKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
                 request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
@@ -35,14 +37,31 @@ namespace Smpp.Tests
                 var names = new SubjectAlternativeNameBuilder();
                 names.AddDnsName("localhost");
                 request.CertificateExtensions.Add(names.Build());
-                using var certificate = request.Create(Root, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddDays(1), RandomNumberGenerator.GetBytes(16));
+                var serial = new byte[16];
+                using (var random = RandomNumberGenerator.Create()) random.GetBytes(serial);
+                using var certificate = request.Create(Root, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddDays(1), serial);
                 using var withKey = certificate.CopyWithPrivateKey(serverKey);
                 // Import an independent key handle: SChannel must not depend on a disposed creation key.
+#if NETFRAMEWORK
+                Server = new X509Certificate2(withKey.Export(X509ContentType.Pfx));
+#else
                 Server = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx), null);
+#endif
             }
 
             internal SslClientAuthenticationOptions ClientOptions(string targetHost = "localhost", bool trust = true)
             {
+#if NETFRAMEWORK
+                return new SmppTlsClientOptions
+                {
+                    TargetHost = targetHost,
+                    CheckCertificateRevocation = false,
+                    // Trust exactly this fixture's certificate and still require the OS hostname check.
+                    CertificateValidationCallback = (_, certificate, _, errors) => trust && certificate != null &&
+                        certificate.GetCertHashString() == Server.GetCertHashString() &&
+                        (errors & ~SslPolicyErrors.RemoteCertificateChainErrors) == SslPolicyErrors.None
+                };
+#else
                 var policy = new X509ChainPolicy
                 {
                     RevocationMode = X509RevocationMode.NoCheck,
@@ -50,6 +69,7 @@ namespace Smpp.Tests
                 };
                 if (trust) policy.CustomTrustStore.Add(Root);
                 return new SslClientAuthenticationOptions { TargetHost = targetHost, CertificateChainPolicy = policy };
+#endif
             }
             public void Dispose() { Server.Dispose(); Root.Dispose(); }
         }
@@ -122,7 +142,7 @@ namespace Smpp.Tests
         [Test]
         public async Task QuitCancelsAStalledTlsHandshake()
         {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            using var listener = new TestTcpListener(IPAddress.Loopback, 0);
             listener.Start();
             var client = new Gate(new GateEvents()).AddClientConnection("tls-cancel", "127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "user", "password");
             client.TlsOptions = new SslClientAuthenticationOptions { TargetHost = "localhost" };
@@ -161,7 +181,7 @@ namespace Smpp.Tests
         [Test]
         public async Task ClientDeadlineBoundsAStalledTlsHandshake()
         {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            using var listener = new TestTcpListener(IPAddress.Loopback, 0);
             listener.Start();
             var client = new Gate(new GateEvents()).AddClientConnection("tls-timeout", "127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "user", "password");
             client.TlsOptions = new SslClientAuthenticationOptions { TargetHost = "localhost" };

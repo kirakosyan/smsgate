@@ -178,7 +178,7 @@ namespace Smpp.Tests
 
         private static void RunBindOnlyServer(int port, ManualResetEventSlim serverReady, ManualResetEventSlim bindReceived)
         {
-            using (var listener = new TcpListener(IPAddress.Loopback, port))
+            using (var listener = new TestTcpListener(IPAddress.Loopback, port))
             {
                 listener.Start();
                 serverReady.Set();
@@ -236,7 +236,7 @@ namespace Smpp.Tests
 
         private static int GetFreePort()
         {
-            using (var listener = new TcpListener(IPAddress.Loopback, 0))
+            using (var listener = new TestTcpListener(IPAddress.Loopback, 0))
             {
                 listener.Start();
                 return ((IPEndPoint)listener.LocalEndpoint).Port;

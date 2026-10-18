@@ -2,6 +2,9 @@ using System;
 using System.Net.Security;
 using System.Linq;
 using Smpp.Events;
+#if NETFRAMEWORK
+using SslClientAuthenticationOptions = Smpp.SmppTlsClientOptions;
+#endif
 
 namespace Smpp
 {
@@ -34,10 +37,10 @@ namespace Smpp
             ValidateAscii(Password, 8, nameof(Password));
             foreach (int value in new[] { SourceTon, SourceNpi, DestinationTon, DestinationNpi })
                 if (value < 0 || value > 255) throw new ArgumentException("TON and NPI must fit one octet.");
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(ResponseTimeoutMilliseconds);
-            ArgumentOutOfRangeException.ThrowIfNegative(ReconnectDelayMilliseconds);
+            Guard.ThrowIfNegativeOrZero(ResponseTimeoutMilliseconds);
+            Guard.ThrowIfNegative(ReconnectDelayMilliseconds);
             if (TlsOptions != null && string.IsNullOrWhiteSpace(TlsOptions.TargetHost)) throw new ArgumentException("TLS requires a certificate TargetHost.");
-            ArgumentNullException.ThrowIfNull(Submission);
+            Guard.ThrowIfNull(Submission);
             Submission.Validate();
         }
         private static void ValidateAscii(string text, int maximum, string name)

@@ -16,10 +16,10 @@ namespace Smpp
         public SmppGateway(GateEvents events) => Events = events ?? throw new ArgumentNullException(nameof(events));
         public Client AddClient(SmppClientOptions options)
         {
-            ArgumentNullException.ThrowIfNull(options);
+            Guard.ThrowIfNull(options);
             lock (clients)
             {
-                ObjectDisposedException.ThrowIf(disposed, this);
+                Guard.ThrowIfDisposed(disposed, this);
                 options.Validate();
                 if (clients.ContainsKey(options.ChannelName)) throw new ArgumentException("Duplicate channel name.", nameof(options));
                 var client = options.CreateClient(Events);

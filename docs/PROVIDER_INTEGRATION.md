@@ -1,6 +1,6 @@
 # Provider integration
 
-These APIs are available since SMSGate 1.1.0. Install with `dotnet add package SMSGate --version 1.1.1`; use the SDK in `global.json` when building this repository. The library remains dependency-free and targets .NET 10.
+These APIs are available since SMSGate 1.1.0. Version 1.2.0 (currently unreleased) adds .NET Framework 4.7.2+ alongside .NET 10. Use the SDK in `global.json` when building this repository. The .NET 10 target remains dependency-free; see [Framework setup](FRAMEWORK_SUPPORT.md) for Framework dependencies and application configuration.
 
 Run the complete loopback example with:
 
@@ -27,13 +27,10 @@ The default `ascii` format and `UseGsm7 = false` retain the previous single-byte
 ## TLS
 
 ```csharp
-using System.Net.Security;
-using System.Security.Cryptography.X509Certificates;
-
-client.TlsOptions = new SslClientAuthenticationOptions
+client.TlsOptions = new SmppTlsClientOptions
 {
     TargetHost = "smpp.provider.example",
-    CertificateRevocationCheckMode = X509RevocationMode.Online
+    CheckCertificateRevocation = true
 };
 await client.ConnectAsync();
 ```
@@ -43,14 +40,14 @@ await client.ConnectAsync();
 For a TLS server, supply a certificate with its private key:
 
 ```csharp
-using var certificate = X509Certificate2.CreateFromPemFile("server.crt", "server.key");
-Server.StartAsync("0.0.0.0", 2776, new SslServerAuthenticationOptions
+// Load an X509Certificate2 with its private key using your application's certificate configuration.
+Server.StartAsync("0.0.0.0", 2776, new SmppTlsServerOptions
 {
     ServerCertificate = certificate
 });
 ```
 
-The server authenticates TLS before reading SMPP credentials. TLS and bind share a ten-second deadline, and `Server.Stop()` cancels pending handshakes. Keep certificates and authentication options alive and unchanged while the listener or connection uses them. The .NET authentication options also support client certificates, certificate selection, and custom root trust policies. The loopback example uses a private trust policy for its temporary certificate; production deployments should use their provider's certificate chain and revocation policy.
+The server authenticates TLS before reading SMPP credentials. TLS and bind share a ten-second deadline, and `Server.Stop()` cancels pending handshakes. Keep certificates and authentication options alive and unchanged while the listener or connection uses them. Portable options support client certificates, protocol selection, revocation, and a validation callback. On .NET 10, the existing native `SslClientAuthenticationOptions` and `SslServerAuthenticationOptions` APIs also expose certificate selection and custom root trust policies. See the [TLS comparison](FRAMEWORK_SUPPORT.md#tls-on-both-targets). The .NET 10 loopback example uses a private trust policy for its temporary certificate; production deployments should use their provider's certificate chain and revocation policy.
 
 ## Per-segment submission and delivery
 

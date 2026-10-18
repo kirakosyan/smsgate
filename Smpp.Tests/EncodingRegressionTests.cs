@@ -41,7 +41,7 @@ namespace Smpp.Tests
                     Assert.That(wire[34], Is.EqualTo(wire.Length - 35), "sm_length must count octets");
                 if (frames.Length > 1)
                 {
-                    Assert.That(wire[35..38], Is.EqualTo(new byte[] { 5, 0, 3 }));
+                    Assert.That(wire.Skip(35).Take(3).ToArray(), Is.EqualTo(new byte[] { 5, 0, 3 }));
                     Assert.That(wire[38], Is.EqualTo(42));
                     Assert.That(wire[39], Is.EqualTo(frames.Length), "UDH count must be hexadecimal on the wire");
                     Assert.That(wire[40], Is.EqualTo(i + 1));
@@ -94,7 +94,7 @@ namespace Smpp.Tests
         {
             var frames = Encode(command, new string('a', 255 * 153));
             Assert.That(frames, Has.Length.EqualTo(255));
-            Assert.That(Convert.FromHexString(frames[^1])[39..41], Is.EqualTo(new byte[] { 255, 255 }));
+            Assert.That(Convert.FromHexString(frames[frames.Length - 1]).Skip(39).Take(2).ToArray(), Is.EqualTo(new byte[] { 255, 255 }));
             Assert.Throws<ArgumentException>(() => Encode(command, new string('a', 255 * 153 + 1)));
         }
 

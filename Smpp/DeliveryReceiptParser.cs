@@ -14,15 +14,15 @@ namespace Smpp
             byte state = ParseState(stateText);
             if (parameters.TryGetValue("001E", out var receiptId))
             {
-                byte[] bytes = Convert.FromHexString(receiptId.ToString());
-                if (bytes.Length < 2 || bytes.Length > 65 || bytes[^1] != 0 || Array.IndexOf(bytes, (byte)0) != bytes.Length - 1)
+                byte[] bytes = HexCodec.FromHexString(receiptId.ToString());
+                if (bytes.Length < 2 || bytes.Length > 65 || bytes[bytes.Length - 1] != 0 || Array.IndexOf(bytes, (byte)0) != bytes.Length - 1)
                     warning?.Invoke("Ignoring invalid receipted_message_id TLV; using receipt text when available.");
                 else
-                    id = Common.HexToString(Convert.ToHexString(bytes.AsSpan(0, bytes.Length - 1)));
+                    id = Common.HexToString(HexCodec.ToHexString(bytes.AsSpan(0, bytes.Length - 1)));
             }
             if (parameters.TryGetValue("0427", out var receiptState))
             {
-                byte[] bytes = Convert.FromHexString(receiptState.ToString());
+                byte[] bytes = HexCodec.FromHexString(receiptState.ToString());
                 if (bytes.Length != 1 || bytes[0] < 1 || bytes[0] > 8)
                     warning?.Invoke("Ignoring invalid message_state TLV; using receipt text when available.");
                 else
@@ -31,11 +31,11 @@ namespace Smpp
             string networkError = "";
             if (parameters.TryGetValue("0423", out var network))
             {
-                byte[] bytes = Convert.FromHexString(network.ToString());
+                byte[] bytes = HexCodec.FromHexString(network.ToString());
                 if (bytes.Length != 3)
                     warning?.Invoke("Ignoring invalid network_error_code TLV; using receipt text when available.");
                 else
-                    networkError = Convert.ToHexString(bytes);
+                    networkError = HexCodec.ToHexString(bytes);
             }
             if (string.IsNullOrWhiteSpace(id) || state < 1 || state > 8)
                 return null;

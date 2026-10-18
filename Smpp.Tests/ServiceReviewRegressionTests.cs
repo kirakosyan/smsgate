@@ -303,7 +303,7 @@ namespace Smpp.Tests
         {
             protected override ValueTask ConnectTransportAsync(TcpClient transport, CancellationToken cancellation) => simulateTimeout
                 ? new ValueTask(Task.Delay(Timeout.Infinite, cancellation))
-                : ValueTask.FromException(new SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused));
+                : new ValueTask(Task.FromException(new SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused)));
             protected override void ScheduleReconnect(int delayMilliseconds) { }
         }
 
@@ -333,7 +333,7 @@ namespace Smpp.Tests
         [Test]
         public async Task TypedClientDefaultsPreserveLegacyInboundDecoding()
         {
-            using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            using var listener = new TestTcpListener(System.Net.IPAddress.Loopback, 0);
             listener.Start();
             var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             var events = new GateEvents();
