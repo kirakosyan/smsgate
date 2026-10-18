@@ -36,15 +36,15 @@ The NuGet package is named `SMSGate`; the assembly and namespaces are `Smpp`. Ve
 
 | Operating system | .NET 10 (`net10.0`) | .NET Framework 4.7.2+ (`net472`) | Validation |
 | --- | --- | --- | --- |
-| ![Windows](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows.svg) Windows | Supported | Available in 1.2.0 | Debug/Release tests and package examples; Framework CI uses the installed newer runtime |
+| ![Windows](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows.svg) Windows | Supported | Supported in 1.2.0 | Debug/Release CI and package examples; Framework package validated on actual 4.7.2 and newer 4.8.1 runtimes |
 | ![Linux](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/linux.svg) Linux | Supported | Windows only | Debug/Release .NET 10 tests and package examples in Ubuntu CI |
 | ![macOS](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/macos.svg) macOS | Not yet qualified | Windows only | No macOS CI lane |
 
-Framework 4.8 and 4.8.1 applications consume the `net472` assembly. Minimum-runtime validation is recorded separately in the [Framework guide](https://github.com/kirakosyan/smsgate/blob/master/docs/FRAMEWORK_SUPPORT.md); a passing test on 4.8.1 is not evidence of execution on 4.7.2. CI does not include dedicated ARM64 qualification. Use an operating system supported by your selected runtime. The package contains no native libraries; Mono, browser, and mobile runtimes are not qualified.
+Framework 4.8 and 4.8.1 applications consume the `net472` assembly. See the [Framework guide](https://github.com/kirakosyan/smsgate/blob/master/docs/FRAMEWORK_SUPPORT.md) for setup and the [validation report](https://github.com/kirakosyan/smsgate/blob/master/docs/FRAMEWORK_VALIDATION.md) for actual 4.7.2 and newer-runtime results. CI does not include dedicated ARM64 qualification. Use an operating system supported by your selected runtime. The package contains no native libraries; Mono, browser, and mobile runtimes are not qualified.
 
 ## Quick start
 
-Create a .NET 10 console application, install the package, and set `SMPP_HOST`, `SMPP_PORT`, `SMPP_SYSTEM_ID`, `SMPP_PASSWORD`, `SMPP_SENDER`, and `SMPP_RECIPIENT` for your provider account. The same async APIs work on Framework; put the code inside an `async Task Main` method and use C# 9 or later for `await using`. The example connects over TCP, waits for a successful bind, submits a message through the bounded async queue, and prints each segment's provider response.
+Create a .NET 10 console application, install the package, and set `SMPP_HOST`, `SMPP_PORT`, `SMPP_SYSTEM_ID`, `SMPP_PASSWORD`, `SMPP_SENDER`, and `SMPP_RECIPIENT` for your provider account. The same async APIs work on Framework; enable C# 9 or later and put the code inside an `async Task Main` method. The example connects over TCP, waits for a successful bind, submits a message through the bounded async queue, and prints each segment's provider response.
 
 ```csharp
 using System;
