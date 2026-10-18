@@ -1,6 +1,6 @@
 # Running SMSGate in a service
 
-These APIs are available since SMSGate 1.1.0. Install with `dotnet add package SMSGate --version 1.1.1`. They target .NET 10 and add no dependencies to the core package. The existing `Gate`, `Client`, `Server`, synchronous submissions, and event signatures remain available.
+These APIs are available since SMSGate 1.1.0. Version 1.2.0 (currently unreleased) adds .NET Framework 4.7.2+ alongside .NET 10. The .NET 10 target adds no package dependencies; see [Framework setup](FRAMEWORK_SUPPORT.md) for Framework compatibility packages and binding redirects. The existing `Gate`, `Client`, `Server`, synchronous submissions, and event signatures remain available.
 
 ## An instance-owned client
 
@@ -14,7 +14,7 @@ var client = gateway.AddClient(new SmppClientOptions
     Port = 2775, // Use the port supplied by your provider.
     SystemId = systemId,
     Password = password,
-    TlsOptions = new SslClientAuthenticationOptions
+    TlsOptions = new SmppTlsClientOptions
     {
         TargetHost = "smpp.provider.example"
     },
@@ -43,7 +43,7 @@ foreach (var part in result.Parts)
 await gateway.StopAsync(shutdownToken);
 ```
 
-Import `Smpp`, `Smpp.Events`, and `System.Net.Security`. Load credentials from your service's configuration/secret provider. `SmppClientOptions.Validate()` rejects invalid ports, directions, credential lengths, octet fields, TLS host settings, and submission limits before creating a client. Credentials are excluded from its string representation. Treat TLS options and legacy public connection fields as startup configuration; do not mutate them during traffic.
+Import `Smpp` and `Smpp.Events`. Load credentials from your service's configuration/secret provider. `SmppClientOptions.Validate()` rejects invalid ports, directions, credential lengths, octet fields, TLS host settings, and submission limits before creating a client. Credentials are excluded from its string representation. Treat TLS options and legacy public connection fields as startup configuration; do not mutate them during traffic.
 
 `SmppGateway` owns its clients and permits the same channel names in separate gateway instances. Its clients do not enter `Gate.Clients`. `SmppClientOptions.CreateClient(events)` also creates an independently owned client; dispose it yourself. Automatic reconnect works for both forms. The legacy static server listener and `Gate` registries remain available for existing applications.
 

@@ -1,7 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Version>1.1.1</Version>
+    <TargetFrameworks>net10.0;net472</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Version>1.2.0</Version>
     <PackageId>SMSGate</PackageId>
     <Title>SMSGate - SMPP client and server for .NET</Title>
     <Authors>Armen Kirakosyan</Authors>
@@ -14,7 +15,7 @@
     <Copyright>Copyright (c) 2016 Armen Kirakosyan</Copyright>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>icon.png</PackageIcon>
-    <PackageReleaseNotes>New SMSGate logo and embedded NuGet icon, consistent platform badges, a clear support matrix, and a modern SmppGateway/SubmitAsync quick start. No protocol API or runtime behavior changes. This release targets .NET 10. See https://github.com/kirakosyan/smsgate/blob/v1.1.1/CHANGELOG.md.</PackageReleaseNotes>
+    <PackageReleaseNotes>Adds .NET Framework 4.7.2 and later alongside .NET 10, including asynchronous submissions, delivery tracking, diagnostics, cancellation, and TLS. Framework-only compatibility dependencies and portable TLS options preserve the existing .NET 10 API. See https://github.com/kirakosyan/smsgate/blob/v1.2.0/CHANGELOG.md.</PackageReleaseNotes>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <!-- Include existing API documentation while undocumented legacy members are completed. -->
     <NoWarn>$(NoWarn);CS1591</NoWarn>
@@ -25,6 +26,17 @@
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net472'">
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>SMSGate.snk</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net472" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.13" />
+    <PackageReference Include="System.Threading.Channels" Version="10.0.13" />
+    <PackageReference Include="System.Diagnostics.DiagnosticSource" Version="10.0.13" />
+    <PackageReference Include="System.Memory" Version="4.6.3" />
+  </ItemGroup>
   <ItemGroup>
     <None Include="../README.md" Pack="true" PackagePath="/" />
     <None Include="../LICENSE" Pack="true" PackagePath="/" />

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Linq;
@@ -207,7 +207,7 @@ namespace Smpp
             get { return _keep_alive; }
             set
             {
-                ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+                Guard.ThrowIfNegativeOrZero(value);
                 _keep_alive = value;
                 if (enquire_link_timer != null)
                 {
@@ -224,7 +224,7 @@ namespace Smpp
             get { return _timeout; }
             set
             {
-                ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+                Guard.ThrowIfNegativeOrZero(value);
                 _timeout = value;
                 if (timeout_timer != null)
                 {
@@ -353,8 +353,8 @@ namespace Smpp
 
         internal Task DrainNotificationsAsync()
         {
-            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            Notify(() => completion.SetResult());
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Notify(() => completion.SetResult(true));
             return completion.Task;
         }
 
@@ -625,8 +625,7 @@ namespace Smpp
                 int offset = 0;
                 while (_partial_pdu.Length - offset >= 8)
                 {
-                    if (!uint.TryParse(_partial_pdu.AsSpan(offset, 8), System.Globalization.NumberStyles.HexNumber,
-                        System.Globalization.CultureInfo.InvariantCulture, out uint length) ||
+                    if (!RuntimeCompatibility.TryParseLength(_partial_pdu, offset, out uint length) ||
                         length < 16 || length > Common.MAX_PDU_LENGTH)
                     {
                         Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Invalid PDU length"));

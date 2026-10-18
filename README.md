@@ -5,13 +5,15 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/kirakosyan/smsgate/ci.yml?branch=master&style=for-the-badge&label=CI)](https://github.com/kirakosyan/smsgate/actions/workflows/ci.yml)
 [![NuGet](https://img.shields.io/nuget/v/SMSGate.svg?style=for-the-badge)](https://www.nuget.org/packages/SMSGate)
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4.svg?style=for-the-badge)](#supported-platforms)
+[![.NET Framework 4.7.2+](https://img.shields.io/badge/.NET_Framework-4.7.2%2B-512BD4.svg?style=for-the-badge)](#supported-platforms)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge)](https://github.com/kirakosyan/smsgate/blob/master/LICENSE)
+[![Sponsor on Patreon](https://img.shields.io/badge/Sponsor-Patreon-FF424D.svg?style=for-the-badge&logo=patreon&logoColor=white)](https://patreon.com/ArmenKirakosyan?utm_medium=unknown&utm_source=join_link&utm_campaign=creatorshare_creator&utm_content=copyLink)
 
 [![Windows: covered by .NET 10 CI](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows-ci.svg)](#supported-platforms)
 [![Linux: covered by .NET 10 CI](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/linux-ci.svg)](#supported-platforms)
 [![macOS: not yet validated](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/macos-unverified.svg)](#supported-platforms)
 
-SMSGate is a lightweight, dependency-free **SMPP 3.4 client and server library for .NET 10**. Build SMS services with asynchronous submissions, delivery tracking, and control over incoming message acknowledgements.
+SMSGate is a lightweight **SMPP 3.4 client and server library for .NET 10 and .NET Framework 4.7.2+**. Build SMS services with asynchronous submissions, delivery tracking, and control over incoming message acknowledgements. The .NET 10 target has no package dependencies; Framework uses Microsoft compatibility packages.
 
 - **Send and receive:** client and server sessions, multipart SMS, GSM-7, Unicode, binary messages, and WAP Push.
 - **Track delivery:** per-segment provider IDs, text and TLV receipts, and aggregate multipart delivery status.
@@ -23,24 +25,24 @@ SMSGate is a lightweight, dependency-free **SMPP 3.4 client and server library f
 ## Install
 
 ```bash
-dotnet add package SMSGate --version 1.1.1
+dotnet add package SMSGate --version 1.2.0
 ```
 
-The NuGet package is named `SMSGate`; the assembly and namespaces are `Smpp`. Applications consuming this release require **.NET 10**.
+The NuGet package is named `SMSGate`; the assembly and namespaces are `Smpp`. Version 1.2.0 contains `net10.0` and `net472` assemblies; NuGet selects the appropriate target. For Framework applications, use PackageReference and enable automatic binding redirects. See the [Framework guide](https://github.com/kirakosyan/smsgate/blob/master/docs/FRAMEWORK_SUPPORT.md) for project setup, TLS options, and runtime validation.
 
 ## Supported platforms
 
-| Operating system | .NET 10 (`net10.0`) | Validation |
-| --- | --- | --- |
-| ![Windows](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows.svg) Windows | Supported | Debug/Release tests and package examples in Windows CI |
-| ![Linux](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/linux.svg) Linux | Supported | Debug/Release tests and package examples in Ubuntu CI |
-| ![macOS](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/macos.svg) macOS | Not yet qualified | No macOS CI lane |
+| Operating system | .NET 10 (`net10.0`) | .NET Framework 4.7.2+ (`net472`) | Validation |
+| --- | --- | --- | --- |
+| ![Windows](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows.svg) Windows | Supported | Supported in 1.2.0 | Debug/Release CI and package examples; Framework package validated on actual 4.7.2 and newer 4.8.1 runtimes |
+| ![Linux](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/linux.svg) Linux | Supported | Windows only | Debug/Release .NET 10 tests and package examples in Ubuntu CI |
+| ![macOS](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/macos.svg) macOS | Not yet qualified | Windows only | No macOS CI lane |
 
-This release targets `net10.0` only. **.NET Framework and earlier .NET versions are not supported.** CI does not currently include dedicated ARM64 qualification. Platform support requires an operating system supported by .NET 10; the package itself contains no native libraries.
+Framework 4.8 and 4.8.1 applications consume the `net472` assembly. See the [Framework guide](https://github.com/kirakosyan/smsgate/blob/master/docs/FRAMEWORK_SUPPORT.md) for setup and the [validation report](https://github.com/kirakosyan/smsgate/blob/master/docs/FRAMEWORK_VALIDATION.md) for actual 4.7.2 and newer-runtime results. CI does not include dedicated ARM64 qualification. Use an operating system supported by your selected runtime. The package contains no native libraries; Mono, browser, and mobile runtimes are not qualified.
 
 ## Quick start
 
-Create a .NET 10 console application, install the package, and set `SMPP_HOST`, `SMPP_PORT`, `SMPP_SYSTEM_ID`, `SMPP_PASSWORD`, `SMPP_SENDER`, and `SMPP_RECIPIENT` for your provider account. The example connects over TCP, waits for a successful bind, submits a message through the bounded async queue, and prints each segment's provider response.
+Create a .NET 10 console application, install the package, and set `SMPP_HOST`, `SMPP_PORT`, `SMPP_SYSTEM_ID`, `SMPP_PASSWORD`, `SMPP_SENDER`, and `SMPP_RECIPIENT` for your provider account. The same async APIs work on Framework; enable C# 9 or later and put the code inside an `async Task Main` method. The example connects over TCP, waits for a successful bind, submits a message through the bounded async queue, and prints each segment's provider response.
 
 ```csharp
 using System;
@@ -100,6 +102,7 @@ These examples use a local SMPP peer and need no provider account:
 | [WorkerService](https://github.com/kirakosyan/smsgate/tree/master/examples/WorkerService) | `SmppGateway`, `SubmitAsync`, Generic Host/DI, delivery tracking, and graceful shutdown |
 | [ProviderFeatures](https://github.com/kirakosyan/smsgate/tree/master/examples/ProviderFeatures) | Validated TLS, GSM-7 multipart messages, and storage before acknowledgement |
 | [LocalExchange](https://github.com/kirakosyan/smsgate/tree/master/examples/LocalExchange) | A complete client/server exchange using the legacy `Gate` API |
+| [FrameworkExchange](https://github.com/kirakosyan/smsgate/tree/master/examples/FrameworkExchange) | A `net472` package consumer using `SmppGateway`, multipart `SubmitAsync`, delivery tracking, and graceful shutdown |
 | [InteropPeer](https://github.com/kirakosyan/smsgate/tree/master/examples/InteropPeer) | Independent Python SMPP wire exchanges in both directions |
 
 ```bash

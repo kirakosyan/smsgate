@@ -42,7 +42,7 @@ namespace Smpp.Tests
                 string response = $"00000010{command:X8}{error:X8}0000002A";
                 connection.MessageHandler(response);
                 connection.MessageHandler(response);
-                Assert.That(statuses[^1], Is.EqualTo(error == 0 ? Common.MessageStatus.sent : Common.MessageStatus.rejected));
+                Assert.That(statuses[statuses.Count - 1], Is.EqualTo(error == 0 ? Common.MessageStatus.sent : Common.MessageStatus.rejected));
                 Assert.That(connection.Pending, Is.Zero);
             }
             Assert.That(statuses, Has.Count.EqualTo(4));

@@ -48,7 +48,7 @@ namespace Smpp
             get => deliveryTrackingStore;
             set
             {
-                ArgumentNullException.ThrowIfNull(value);
+                Guard.ThrowIfNull(value);
                 lock (SessionLock)
                 {
                     if (deliveryTrackingStarted || connected) throw new InvalidOperationException("Set the delivery store before connecting or processing traffic.");
@@ -193,7 +193,7 @@ namespace Smpp
             part.Status = receipt.Status;
             part.Final = IsFinalReceipt(receipt);
             if (part.Final && part.AcceptedAt != 0)
-                Measure(SmppDiagnostics.DeliveryLatency, System.Diagnostics.Stopwatch.GetElapsedTime(part.AcceptedAt).TotalMilliseconds);
+                Measure(SmppDiagnostics.DeliveryLatency, RuntimeCompatibility.GetElapsedTime(part.AcceptedAt).TotalMilliseconds);
             PublishDeliveryStatus(part.Submission);
         }
 

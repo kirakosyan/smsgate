@@ -149,8 +149,8 @@ namespace Smpp.Tests
             using var client = new TcpClient();
             int calls = 0, failures = 0, accepted = 0;
             await Server.RunAcceptLoop(_ => ++calls <= 2
-                    ? ValueTask.FromException<TcpClient>(new SocketException((int)error))
-                    : ValueTask.FromResult(client),
+                    ? new ValueTask<TcpClient>(Task.FromException<TcpClient>(new SocketException((int)error)))
+                    : new ValueTask<TcpClient>(client),
                 value => { Assert.That(value, Is.SameAs(client)); accepted++; cancellation.Cancel(); },
                 _ => failures++, cancellation.Token);
             Assert.That(calls, Is.EqualTo(3));
@@ -166,7 +166,7 @@ namespace Smpp.Tests
             await Server.RunAcceptLoop(_ =>
                 {
                     calls++;
-                    return ValueTask.FromException<TcpClient>(new SocketException((int)SocketError.ConnectionAborted));
+                    return new ValueTask<TcpClient>(Task.FromException<TcpClient>(new SocketException((int)SocketError.ConnectionAborted)));
                 }, _ => Assert.Fail("No connection should be accepted"), _ => cancellation.Cancel(), cancellation.Token);
             Assert.That(calls, Is.EqualTo(1));
         }

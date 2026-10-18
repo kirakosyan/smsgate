@@ -29,14 +29,14 @@ namespace Smpp
         public int MaxPendingAcknowledgements
         {
             get => maxPendingAcknowledgements;
-            set { ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value); maxPendingAcknowledgements = value; }
+            set { Guard.ThrowIfNegativeOrZero(value); maxPendingAcknowledgements = value; }
         }
 
         /// <summary>Application acknowledgement deadline in milliseconds. Timeout or handler failure returns ESME_RSYSERR.</summary>
         public int AcknowledgementTimeout
         {
             get => acknowledgementTimeout;
-            set { ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value); acknowledgementTimeout = value; }
+            set { Guard.ThrowIfNegativeOrZero(value); acknowledgementTimeout = value; }
         }
 
         private void DispatchInbound(Pdu request, string sender, string recipient, string body, string format,

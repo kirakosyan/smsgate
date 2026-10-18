@@ -20,7 +20,7 @@ namespace Smpp
         /// <summary>Returns whether every character can be represented without replacement.</summary>
         public static bool CanEncode(string text)
         {
-            ArgumentNullException.ThrowIfNull(text);
+            Guard.ThrowIfNull(text);
             foreach (char value in text)
                 if (value == '\u001b' || (Alphabet.IndexOf(value) < 0 && !Extensions.ContainsKey(value)))
                     return false;
@@ -33,7 +33,7 @@ namespace Smpp
         /// <summary>Encodes unpacked septets. Unsupported characters are rejected, never replaced.</summary>
         public static byte[] Encode(string text)
         {
-            ArgumentNullException.ThrowIfNull(text);
+            Guard.ThrowIfNull(text);
             var result = new List<byte>(text.Length);
             foreach (char value in text)
             {

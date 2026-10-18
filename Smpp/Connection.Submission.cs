@@ -46,7 +46,7 @@ namespace Smpp
             get { lock (SessionLock) return submissionOptions; }
             set
             {
-                ArgumentNullException.ThrowIfNull(value);
+                Guard.ThrowIfNull(value);
                 value.Validate();
                 lock (SessionLock)
                 {
@@ -60,10 +60,10 @@ namespace Smpp
         /// <summary>Queues a bounded submission and awaits every PDU response. Queue saturation returns QueueFull immediately.</summary>
         public async Task<SubmissionResult> SubmitAsync(OutboundMessage message, CancellationToken cancellationToken = default)
         {
-            ArgumentNullException.ThrowIfNull(message);
-            ArgumentNullException.ThrowIfNull(message.Body);
-            ArgumentNullException.ThrowIfNull(message.Sender);
-            ArgumentNullException.ThrowIfNull(message.Recipient);
+            Guard.ThrowIfNull(message);
+            Guard.ThrowIfNull(message.Body);
+            Guard.ThrowIfNull(message.Sender);
+            Guard.ThrowIfNull(message.Recipient);
             // Validate encoding before admitting work so malformed input is never silently queued.
             int partCount = EncodeSubmission(message, 1, 1).Length;
             var work = new SendWork { Message = message, Cancellation = cancellationToken, PartCount = partCount, ParentContext = Activity.Current?.Context ?? default };
@@ -147,7 +147,7 @@ namespace Smpp
                     if (attempt > submissionOptions.MaxThrottleRetries || result.Parts.Count == 0 ||
                         result.Parts.Any(part => part.CommandStatus != 0x58) || result.Outcome != SubmissionOutcome.Rejected) break;
                     Diagnose("submission.throttled");
-                    await Task.Delay(submissionOptions.ThrottleRetryDelay * attempt, cancellation.Token).ConfigureAwait(false);
+                    await Task.Delay(TimeSpan.FromTicks(checked(submissionOptions.ThrottleRetryDelay.Ticks * attempt)), cancellation.Token).ConfigureAwait(false);
                 }
                 activity?.SetTag("smpp.outcome", result.Outcome.ToString());
 
@@ -223,7 +223,7 @@ namespace Smpp
             {
                 RemoveUnsentParts();
             }
-            var parts = responses.Where(part => part.Completion.Task.IsCompletedSuccessfully).Select(part => part.Completion.Task.Result).ToArray();
+            var parts = responses.Where(part => part.Completion.Task.Status == TaskStatus.RanToCompletion).Select(part => part.Completion.Task.Result).ToArray();
             bool sent = responses.Any(part => part.Sent);
             var outcome = cancelled ? (stopped ? SubmissionOutcome.Stopped : SubmissionOutcome.Cancelled) :
                 parts.Length != frames.Length || parts.Any(part => part.CommandStatus == null) ? SubmissionOutcome.Unknown :
@@ -261,7 +261,13 @@ namespace Smpp
             try
             {
                 long now = Stopwatch.GetTimestamp();
-                if (nextPduAt > now) await Task.Delay(TimeSpan.FromSeconds((nextPduAt - now) / (double)Stopwatch.Frequency), token).ConfigureAwait(false);
+                while (nextPduAt > now)
+                {
+                    // Task.Delay has millisecond resolution; round up and recheck to avoid sending early.
+                    var remaining = RuntimeCompatibility.StopwatchTicksToTimeSpan(nextPduAt - now);
+                    await Task.Delay(Math.Max(1, (int)Math.Ceiling(remaining.TotalMilliseconds)), token).ConfigureAwait(false);
+                    now = Stopwatch.GetTimestamp();
+                }
                 nextPduAt = Stopwatch.GetTimestamp() + Stopwatch.Frequency / submissionOptions.PdusPerSecond;
             }
             finally { rateLock.Release(); }

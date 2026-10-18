@@ -9,6 +9,9 @@ using System.Threading.Tasks;
 using Smpp.Events;
 using Smpp.Requests;
 using Smpp.Responses;
+#if NETFRAMEWORK
+using SslServerAuthenticationOptions = Smpp.SmppTlsServerOptions;
+#endif
 
 namespace Smpp
 {
@@ -68,9 +71,15 @@ namespace Smpp
         {
             if (!IPAddress.TryParse(ip, out var address))
                 throw new ArgumentException("Check IP address", nameof(ip));
+#if NETFRAMEWORK
+            tlsOptions = tlsOptions?.Snapshot();
+            if (tlsOptions != null && tlsOptions.ServerCertificate == null)
+                throw new ArgumentException("TLS listeners require a server certificate.", nameof(tlsOptions));
+#else
             if (tlsOptions != null && tlsOptions.ServerCertificate == null && tlsOptions.ServerCertificateContext == null &&
                 tlsOptions.ServerCertificateSelectionCallback == null)
                 throw new ArgumentException("TLS listeners require a server certificate or a certificate selection callback.", nameof(tlsOptions));
+#endif
             lock (ListenerLock)
             {
                 if (running)
@@ -130,17 +139,27 @@ namespace Smpp
         {
             bool accepted = false;
             System.IO.Stream stream = null;
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-            deadline.CancelAfter(bindTimeoutMilliseconds);
+            CancellationTokenSource deadline = null;
             try
             {
+                // Framework can reject registration after Stop has disposed the listener token source.
+                // The accepted socket is already ours, so registration belongs inside its cleanup scope.
+                deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                deadline.CancelAfter(bindTimeoutMilliseconds);
                 stream = client.GetStream();
                 stream.WriteTimeout = 10000;
                 if (tlsOptions != null)
                 {
+#if NETFRAMEWORK
+                    var secure = new SslStream(stream, false, tlsOptions.CertificateValidationCallback);
+                    stream = secure;
+                    await FrameworkAsync.WithCancellation(() => secure.AuthenticateAsServerAsync(tlsOptions.ServerCertificate,
+                        tlsOptions.ClientCertificateRequired, tlsOptions.EnabledSslProtocols, tlsOptions.CheckCertificateRevocation), secure.Dispose, deadline.Token).ConfigureAwait(false);
+#else
                     var secure = new SslStream(stream, false);
                     stream = secure;
                     await secure.AuthenticateAsServerAsync(tlsOptions, deadline.Token).ConfigureAwait(false);
+#endif
                 }
                 var header = new byte[4];
                 await stream.ReadExactlyAsync(header, deadline.Token).ConfigureAwait(false);
@@ -149,7 +168,11 @@ namespace Smpp
                     return;
                 var bytes = new byte[length];
                 Buffer.BlockCopy(header, 0, bytes, 0, header.Length);
+#if NETFRAMEWORK
+                await FrameworkAsync.ReadExactlyAsync(stream, bytes, header.Length, bytes.Length - header.Length, deadline.Token).ConfigureAwait(false);
+#else
                 await stream.ReadExactlyAsync(bytes.AsMemory(header.Length), deadline.Token).ConfigureAwait(false);
+#endif
                 string pdu = Common.ConvertByteArrayToHexString(bytes);
                 var command = (Common.CommandId)uint.Parse(pdu.Substring(8, 8), System.Globalization.NumberStyles.HexNumber);
                 string login;
@@ -204,6 +227,7 @@ namespace Smpp
             }
             finally
             {
+                deadline?.Dispose();
                 if (!accepted)
                 {
                     stream?.Dispose();

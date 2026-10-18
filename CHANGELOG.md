@@ -2,6 +2,18 @@
 
 This project uses [Semantic Versioning](https://semver.org/). Released versions are tagged as `vMAJOR.MINOR.PATCH`.
 
+## 1.2.0 - 2026-10-18
+
+- Adds a Windows .NET Framework 4.7.2 target alongside .NET 10. Framework 4.8 and 4.8.1 applications use the same `net472` assembly.
+- Preserves the modern async gateway, bounded submissions, multipart delivery tracking, diagnostics, and application acknowledgements on both targets.
+- Adds portable `SmppTlsClientOptions` and `SmppTlsServerOptions`, with system TLS defaults and cancellation that closes pending Framework socket/TLS operations. Existing .NET 10 native TLS option types remain available.
+- Runs the shared regression suite on both targets, adds a Framework package consumer, and gates releases on Windows Framework validation as well as .NET 10 checks.
+- Adds a Patreon sponsorship badge and documents Framework setup, dependencies, TLS differences, and runtime qualification.
+- Strong-names the new Framework assembly, snapshots portable TLS settings consistently, preserves sub-millisecond timing precision, and closes a cancellation/transport ownership race.
+- Validates and publishes one immutable package artifact, with a qualified package hash required before publishing. Local Framework restores use a fresh cache for each build.
+
+The .NET 10 dependency group remains empty. Framework uses Microsoft.Bcl.AsyncInterfaces, System.Threading.Channels, System.Diagnostics.DiagnosticSource, and System.Memory with their transitive dependencies. Framework reference assemblies are build-only.
+
 ## 1.1.1 - 2026-10-18
 
 - New SMSGate logo, editable vector artwork, and an embedded 128 x 128 NuGet package icon.

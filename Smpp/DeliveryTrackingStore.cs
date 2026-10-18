@@ -20,7 +20,7 @@ namespace Smpp
         public int Capacity
         {
             get { lock (SyncRoot) return capacity; }
-            set { ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value); lock (SyncRoot) capacity = value; }
+            set { Guard.ThrowIfNegativeOrZero(value); lock (SyncRoot) capacity = value; }
         }
         /// <summary>Expires all unfinished submissions. Coordinate with every connection using this store before clearing it.</summary>
         public void Clear()

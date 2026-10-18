@@ -147,7 +147,7 @@ namespace Smpp.Tests
             internal TcpClient Remote { get; }
             internal SocketPair()
             {
-                using var listener = new TcpListener(IPAddress.Loopback, 0);
+                using var listener = new TestTcpListener(IPAddress.Loopback, 0);
                 listener.Start();
                 Local = new TcpClient("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port);
                 Remote = listener.AcceptTcpClient();

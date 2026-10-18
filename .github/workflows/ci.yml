@@ -32,15 +32,30 @@ jobs:
       - name: Restore
         run: dotnet restore SMSGate.sln -warnaserror
       - name: Debug tests
-        run: dotnet test SMSGate.sln --configuration Debug --no-restore -warnaserror --logger trx --results-directory TestResults/Debug
+        run: dotnet test SMSGate.sln --framework net10.0 --configuration Debug --no-restore -warnaserror --logger trx --results-directory TestResults/Debug
       - name: Release tests
-        run: dotnet test SMSGate.sln --configuration Release --no-restore -warnaserror --logger trx --results-directory TestResults/Release
+        run: dotnet test SMSGate.sln --framework net10.0 --configuration Release --no-restore -warnaserror --logger trx --results-directory TestResults/Release
+      - name: Framework Debug and Release tests (installed Windows runtime)
+        if: runner.os == 'Windows'
+        run: |
+          dotnet test Smpp.Tests/Smpp.Tests.csproj --framework net472 --configuration Debug --no-restore -warnaserror --logger trx --results-directory TestResults/Framework-Debug
+          dotnet test Smpp.Tests/Smpp.Tests.csproj --framework net472 --configuration Release --no-restore -warnaserror --logger trx --results-directory TestResults/Framework-Release
+      - name: Build both package targets
+        run: dotnet build Smpp/Smpp.csproj --configuration Release --no-restore -warnaserror
       - name: Pack
         run: dotnet pack Smpp/Smpp.csproj --configuration Release --no-build --no-restore -warnaserror --output artifacts
       - name: Restore example from the package
         run: dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifacts" -warnaserror
       - name: Verify local SMPP exchange using the package
         run: dotnet run --project examples/LocalExchange/LocalExchange.csproj --configuration Release --no-restore
+      - name: Verify Framework modern API using the package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:NUGET_PACKAGES = Join-Path $env:RUNNER_TEMP 'smsgate-framework-consumer'
+          $version = dotnet msbuild Smpp/Smpp.csproj -getProperty:Version
+          ./scripts/restore-framework-example.ps1 -PackageDirectory artifacts -Version $version
+          dotnet run --project examples/FrameworkExchange/FrameworkExchange.csproj --configuration Release --no-restore -p:SMSGateVersion=$version
       - name: Verify provider features using the package
         run: |
           version=$(dotnet msbuild Smpp/Smpp.csproj -getProperty:Version | tr -d '\r')

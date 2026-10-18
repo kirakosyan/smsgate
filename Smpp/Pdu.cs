@@ -1,4 +1,4 @@
-﻿using Smpp.Exceptions;
+using Smpp.Exceptions;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -137,10 +137,10 @@ namespace Smpp
                 if (parameter.Key.Length != 4)
                     throw new ArgumentException("TLV tags must contain four hexadecimal digits.");
                 ushort tag = ushort.Parse(parameter.Key, System.Globalization.NumberStyles.HexNumber);
-                byte[] bytes = Convert.FromHexString(parameter.Value.ToString());
+                byte[] bytes = HexCodec.FromHexString(parameter.Value.ToString());
                 if (bytes.Length > ushort.MaxValue)
                     throw new ArgumentException("TLV values cannot exceed 65,535 octets.");
-                result.Append($"{tag:X4}{bytes.Length:X4}{Convert.ToHexString(bytes)}");
+                result.Append($"{tag:X4}{bytes.Length:X4}{HexCodec.ToHexString(bytes)}");
             }
             return result.ToString();
         }

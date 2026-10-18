@@ -13,9 +13,9 @@ namespace Smpp
         public TimeSpan ThrottleRetryDelay { get; init; } = TimeSpan.FromSeconds(1);
         internal void Validate()
         {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(QueueCapacity);
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxInFlightPdus);
-            ArgumentOutOfRangeException.ThrowIfNegative(PdusPerSecond);
+            Guard.ThrowIfNegativeOrZero(QueueCapacity);
+            Guard.ThrowIfNegativeOrZero(MaxInFlightPdus);
+            Guard.ThrowIfNegative(PdusPerSecond);
             if (MaxThrottleRetries < 0 || MaxThrottleRetries > 10) throw new ArgumentOutOfRangeException(nameof(MaxThrottleRetries));
             if (ThrottleRetryDelay <= TimeSpan.Zero || ThrottleRetryDelay > TimeSpan.FromMinutes(5)) throw new ArgumentOutOfRangeException(nameof(ThrottleRetryDelay));
         }

@@ -15,7 +15,7 @@ namespace Smpp
         internal static Part[] Encode(string body, int coding, int largeMessageMethod,
             int asciiSplit, bool packed, byte reference, bool gsm7 = false)
         {
-            ArgumentNullException.ThrowIfNull(body);
+            Guard.ThrowIfNull(body);
             if (asciiSplit < 1 || asciiSplit > Common.ASCII_MESSAGE_SPLIT_BASE)
                 throw new ArgumentOutOfRangeException(nameof(asciiSplit));
             if (largeMessageMethod < 1 || largeMessageMethod > 4)
@@ -25,10 +25,10 @@ namespace Smpp
             if (coding == 245)
                 body = EncodeWapPush(body);
             if (hexBody)
-                body = Convert.ToHexString(Convert.FromHexString(body));
+                body = HexCodec.ToHexString(HexCodec.FromHexString(body));
             // Work in septets so escapes count towards limits and cannot cross segment boundaries.
             if (gsm7 && coding == 0)
-                body = Encoding.Latin1.GetString(Gsm7Encoding.Encode(body));
+                body = RuntimeCompatibility.Latin1.GetString(Gsm7Encoding.Encode(body));
 
             int unit = hexBody ? 2 : 1;
             int limit = coding == 8 ? 70 : coding == 0 || coding == 1 ? 160 : 140;
@@ -67,7 +67,7 @@ namespace Smpp
                 if (hexBody)
                     hex = segment;
                 else if (coding == 8)
-                    hex = Convert.ToHexString(Encoding.BigEndianUnicode.GetBytes(segment));
+                    hex = HexCodec.ToHexString(Encoding.BigEndianUnicode.GetBytes(segment));
                 else if (packed && (coding == 0 || coding == 1))
                     hex = Pack(segment, multipart ? 1 : 0, gsm7 && coding == 0);
                 else
@@ -112,21 +112,21 @@ namespace Smpp
             if (coding == 2 || coding == 245)
                 return hex.ToUpperInvariant();
             if (coding == 8)
-                return new UnicodeEncoding(true, false, true).GetString(Convert.FromHexString(hex));
+                return new UnicodeEncoding(true, false, true).GetString(HexCodec.FromHexString(hex));
             if (packed && (coding == 0 || coding == 1))
             {
                 string septets = Unpack(hex, multipartHeader.Length > 0 ? 1 : 0, gsm7 && coding == 0);
-                return gsm7 && coding == 0 ? Gsm7Encoding.Decode(Encoding.Latin1.GetBytes(septets)) : septets;
+                return gsm7 && coding == 0 ? Gsm7Encoding.Decode(RuntimeCompatibility.Latin1.GetBytes(septets)) : septets;
             }
             if (gsm7 && coding == 0)
-                return Gsm7Encoding.Decode(Convert.FromHexString(hex));
+                return Gsm7Encoding.Decode(HexCodec.FromHexString(hex));
             return coding == 0 || coding == 1 || coding == 3 ? Common.HexToString(hex) : hex.ToUpperInvariant();
         }
 
         private static string Pack(string body, int fillBits, bool gsm7)
         {
             // Lengthless packed transport uses the TS 23.038 USSD padding convention.
-            if (gsm7 && body.EndsWith('\r') && (body.Length * 7 + fillBits) % 8 == 0)
+            if (gsm7 && body.EndsWith("\r", StringComparison.Ordinal) && (body.Length * 7 + fillBits) % 8 == 0)
                 body += '\r';
             var bytes = new byte[(body.Length * 7 + fillBits + 7) / 8];
             for (int i = 0; i < body.Length; i++)
@@ -145,12 +145,12 @@ namespace Smpp
                 if (bit % 8 > 1)
                     bytes[bit / 8 + 1] |= (byte)(0x0D >> (8 - bit % 8));
             }
-            return Convert.ToHexString(bytes);
+            return HexCodec.ToHexString(bytes);
         }
 
         private static string Unpack(string hex, int fillBits, bool gsm7)
         {
-            var bytes = Convert.FromHexString(hex);
+            var bytes = HexCodec.FromHexString(hex);
             var result = new StringBuilder();
             for (int bit = fillBits; bit + 7 <= bytes.Length * 8; bit += 7)
             {
@@ -162,9 +162,9 @@ namespace Smpp
             // A spare seven bits are padded with CR for GSM-7, preserving a genuine trailing '@'.
             if (gsm7)
             {
-                if ((bytes.Length * 8 - fillBits) % 7 == 0 && result.Length > 0 && result[^1] == '\r')
+                if ((bytes.Length * 8 - fillBits) % 7 == 0 && result.Length > 0 && result[result.Length - 1] == '\r')
                     result.Length--;
-                else if (result.Length > 1 && result[^1] == '\r' && result[^2] == '\r' &&
+                else if (result.Length > 1 && result[result.Length - 1] == '\r' && result[result.Length - 2] == '\r' &&
                     ((result.Length - 1) * 7 + fillBits) % 8 == 0)
                     result.Length--;
                 return result.ToString();
