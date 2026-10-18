@@ -57,6 +57,18 @@ namespace Smpp.Tests
 #endif
         }
 
+        [Test]
+        public async Task DisposedListenerCancellationStillClosesTheAcceptedSocket()
+        {
+            using var pair = new SocketPair();
+            var cancellation = new CancellationTokenSource();
+            var token = cancellation.Token;
+            cancellation.Cancel();
+            cancellation.Dispose();
+            await Server.CreateConnection(null, pair.Local, token).WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.That(await pair.Remote.GetStream().ReadAsync(new byte[1]).AsTask().WaitAsync(TimeSpan.FromSeconds(2)), Is.Zero);
+        }
+
 #if NETFRAMEWORK
         private sealed class OwnedResource : IDisposable
         {

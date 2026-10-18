@@ -138,10 +138,13 @@ namespace Smpp
         {
             bool accepted = false;
             System.IO.Stream stream = null;
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-            deadline.CancelAfter(bindTimeoutMilliseconds);
+            CancellationTokenSource deadline = null;
             try
             {
+                // Framework can reject registration after Stop has disposed the listener token source.
+                // The accepted socket is already ours, so registration belongs inside its cleanup scope.
+                deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                deadline.CancelAfter(bindTimeoutMilliseconds);
                 stream = client.GetStream();
                 stream.WriteTimeout = 10000;
                 if (tlsOptions != null)
@@ -223,6 +226,7 @@ namespace Smpp
             }
             finally
             {
+                deadline?.Dispose();
                 if (!accepted)
                 {
                     stream?.Dispose();
