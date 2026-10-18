@@ -131,7 +131,7 @@ namespace Smpp.Tests
             }
             finally { releaseAbort.Set(); }
             await cancelling;
-            Assert.ThrowsAsync<OperationCanceledException>(async () => await waiting.WaitAsync(TimeSpan.FromSeconds(3)));
+            await Assert.ThrowsAsync<OperationCanceledException>(async () => await waiting.WaitAsync(TimeSpan.FromSeconds(3)));
         }
 
         private sealed class OwnedResource : IDisposable
@@ -141,11 +141,11 @@ namespace Smpp.Tests
         }
 
         [Test]
-        public void CancellationAtAcceptCompletionDisposesTheUnclaimedResource()
+        public async Task CancellationAtAcceptCompletionDisposesTheUnclaimedResource()
         {
             using var cancellation = new CancellationTokenSource();
             var resource = new OwnedResource();
-            Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await Assert.ThrowsAsync<OperationCanceledException>(async () =>
                 await FrameworkAsync.WithCancellation(() =>
                 {
                     cancellation.Cancel();
@@ -161,9 +161,9 @@ namespace Smpp.Tests
             using var cancellation = new CancellationTokenSource();
             var waiting = completion.Task.WaitAsync(cancellation.Token);
             cancellation.Cancel();
-            var exception = Assert.ThrowsAsync<OperationCanceledException>(async () => await waiting);
+            var exception = await Assert.ThrowsAsync<OperationCanceledException>(async () => await waiting);
             Assert.That(exception.CancellationToken, Is.EqualTo(cancellation.Token));
-            Assert.ThrowsAsync<TimeoutException>(async () => await completion.Task.WaitAsync(TimeSpan.FromMilliseconds(30)));
+            await Assert.ThrowsAsync<TimeoutException>(async () => await completion.Task.WaitAsync(TimeSpan.FromMilliseconds(30)));
             completion.SetResult(42);
             Assert.That(await completion.Task.WaitAsync(TimeSpan.FromSeconds(1)), Is.EqualTo(42));
         }
@@ -175,7 +175,7 @@ namespace Smpp.Tests
             using var cancellation = new CancellationTokenSource();
             var reading = pair.Local.GetStream().ReadExactlyAsync(new byte[16], cancellation.Token).AsTask();
             cancellation.Cancel();
-            Assert.ThrowsAsync<OperationCanceledException>(async () => await reading.WaitAsync(TimeSpan.FromSeconds(2)));
+            await Assert.ThrowsAsync<OperationCanceledException>(async () => await reading.WaitAsync(TimeSpan.FromSeconds(2)));
             Assert.That(await pair.Remote.GetStream().ReadAsync(new byte[1]), Is.Zero);
         }
 
