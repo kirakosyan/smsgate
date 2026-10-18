@@ -261,7 +261,13 @@ namespace Smpp
             try
             {
                 long now = Stopwatch.GetTimestamp();
-                if (nextPduAt > now) await Task.Delay(TimeSpan.FromSeconds((nextPduAt - now) / (double)Stopwatch.Frequency), token).ConfigureAwait(false);
+                while (nextPduAt > now)
+                {
+                    // Task.Delay has millisecond resolution; round up and recheck to avoid sending early.
+                    var remaining = RuntimeCompatibility.StopwatchTicksToTimeSpan(nextPduAt - now);
+                    await Task.Delay(Math.Max(1, (int)Math.Ceiling(remaining.TotalMilliseconds)), token).ConfigureAwait(false);
+                    now = Stopwatch.GetTimestamp();
+                }
                 nextPduAt = Stopwatch.GetTimestamp() + Stopwatch.Frequency / submissionOptions.PdusPerSecond;
             }
             finally { rateLock.Release(); }

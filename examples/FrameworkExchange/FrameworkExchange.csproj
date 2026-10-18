@@ -4,6 +4,8 @@
     <TargetFramework>net472</TargetFramework>
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>../../Smpp/SMSGate.snk</AssemblyOriginatorKeyFile>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
     <SMSGateVersion Condition="'$(SMSGateVersion)' == ''">1.2.0</SMSGateVersion>

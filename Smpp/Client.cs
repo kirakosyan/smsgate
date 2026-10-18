@@ -17,8 +17,14 @@ namespace Smpp
         private CancellationTokenSource connectCancellation;
         private Task<bool> connecting;
 
-        /// <summary>Optional TLS settings. Set TargetHost to the certificate hostname. Null uses plain TCP.</summary>
+#if NETFRAMEWORK
+        private SslClientAuthenticationOptions tlsOptions;
+        /// <summary>Optional TLS settings. Configure before assignment: scalar settings and the certificate collection are snapshotted. Null uses plain TCP.</summary>
+        public SslClientAuthenticationOptions TlsOptions { get => tlsOptions; set => tlsOptions = value?.Snapshot(); }
+#else
+        /// <summary>Optional TLS settings. Set TargetHost to the certificate hostname. Converting portable options snapshots their settings and certificate collection. Native options retain their usual reference semantics. Null uses plain TCP.</summary>
         public SslClientAuthenticationOptions TlsOptions { get; set; }
+#endif
 
         public Client(string channelName, GateEvents events) : this(channelName, events, true) { }
 

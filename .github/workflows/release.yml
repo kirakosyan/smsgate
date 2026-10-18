@@ -4,6 +4,15 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      validation_run_id:
+        description: 'Successful tag validation run to publish; leave empty to validate only'
+        type: string
+        default: ''
+      qualified_package_sha256:
+        description: 'Package SHA-256 from actual Framework 4.7.2 qualification'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -14,7 +23,7 @@ concurrency:
 
 jobs:
   validate:
-    if: github.repository == 'kirakosyan/smsgate' && github.ref_type == 'tag'
+    if: github.repository == 'kirakosyan/smsgate' && inputs.validation_run_id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -34,9 +43,11 @@ jobs:
         id: version
         shell: bash
         run: |
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
           version=$(dotnet msbuild Smpp/Smpp.csproj -getProperty:Version)
-          test "$GITHUB_REF_NAME" = "v$version"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Restore
         run: dotnet restore SMSGate.sln -warnaserror
@@ -46,8 +57,10 @@ jobs:
         run: dotnet test SMSGate.sln --framework net10.0 --configuration Release --no-restore -warnaserror
       - name: Build both package targets
         run: dotnet build Smpp/Smpp.csproj --configuration Release --no-restore -warnaserror
+      - name: Restore the API compatibility baseline
+        run: dotnet restore Smpp/Smpp.csproj -warnaserror -p:EnablePackageValidation=true -p:PackageValidationBaselineVersion=1.1.1
       - name: Pack
-        run: dotnet pack Smpp/Smpp.csproj --configuration Release --no-build --no-restore -warnaserror --output artifacts
+        run: dotnet pack Smpp/Smpp.csproj --configuration Release --no-build --no-restore -warnaserror --output artifacts -p:EnablePackageValidation=true -p:PackageValidationBaselineVersion=1.1.1
       - name: Restore example from the package
         run: dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifacts" -warnaserror
       - name: Verify local SMPP exchange using the package
@@ -78,9 +91,11 @@ jobs:
           if-no-files-found: error
 
   validate-framework:
-    if: github.repository == 'kirakosyan/smsgate' && github.ref_type == 'tag'
+    needs: validate
     runs-on: windows-latest
     timeout-minutes: 15
+    env:
+      CI: 'true'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
@@ -90,42 +105,69 @@ jobs:
         run: dotnet test Smpp.Tests/Smpp.Tests.csproj --framework net472 --configuration Debug -warnaserror --logger trx --results-directory TestResults/Framework-Debug
       - name: Framework Release tests (installed Windows runtime)
         run: dotnet test Smpp.Tests/Smpp.Tests.csproj --framework net472 --configuration Release --no-restore -warnaserror --logger trx --results-directory TestResults/Framework-Release
-      - name: Pack and verify Framework consumer
+      - name: Download the canonical release packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifact_id }}
+          path: artifacts
+      - name: Verify the exact package on Framework
         run: |
-          dotnet pack Smpp/Smpp.csproj --configuration Release -warnaserror --output artifacts
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:NUGET_PACKAGES = Join-Path $env:RUNNER_TEMP 'smsgate-framework-consumer'
-          $version = dotnet msbuild Smpp/Smpp.csproj -getProperty:Version
+          $version = '${{ needs.validate.outputs.version }}'
           ./scripts/restore-framework-example.ps1 -PackageDirectory artifacts -Version $version
-          dotnet run --project examples/FrameworkExchange/FrameworkExchange.csproj --configuration Release --no-restore -p:SMSGateVersion=$version
+          dotnet build examples/FrameworkExchange/FrameworkExchange.csproj --configuration Release --no-restore -p:SMSGateVersion=$version -warnaserror
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $packageRoot = (Get-Content Smpp.Tests/obj/project.assets.json -Raw | ConvertFrom-Json).packageFolders.PSObject.Properties.Name | Select-Object -First 1
+          $runner = Join-Path $packageRoot 'nunit.consolerunner/3.22.0/tools'
+          ./scripts/create-framework-bundle.ps1 -Package "artifacts/SMSGate.$version.nupkg" -RunnerDirectory $runner -Destination artifacts/framework-bundle -ExpectedTests 1057
+          ./scripts/qualify-framework.ps1 -BundleDirectory artifacts/framework-bundle -ResultsDirectory TestResults/Framework-Package
       - name: Upload Framework runtime reports
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: framework-test-results
-          path: TestResults/**/*.trx
+          path: |
+            TestResults/
+            artifacts/framework-bundle/
           if-no-files-found: error
 
   publish:
-    needs: [validate, validate-framework]
+    if: github.repository == 'kirakosyan/smsgate' && github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && inputs.validation_run_id != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: nuget
     permissions:
       contents: write
       id-token: write
-    env:
-      PACKAGE_VERSION: ${{ needs.validate.outputs.version }}
+      actions: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           global-json-file: global.json
+      - name: Verify the qualified validation run
+        id: qualified
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+          QUALIFIED_PACKAGE_SHA256: ${{ inputs.qualified_package_sha256 }}
+        run: ./scripts/verify-release-input.ps1 -RunId $env:VALIDATION_RUN_ID -PackageSha256 $env:QUALIFIED_PACKAGE_SHA256
       - name: Download the validated packages
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          artifact-ids: ${{ needs.validate.outputs.artifact_id }}
+          artifact-ids: ${{ steps.qualified.outputs.artifact_id }}
+          run-id: ${{ inputs.validation_run_id }}
+          github-token: ${{ github.token }}
           path: artifacts
+      - name: Verify exact qualified bytes and release metadata
+        shell: pwsh
+        env:
+          QUALIFIED_PACKAGE_SHA256: ${{ inputs.qualified_package_sha256 }}
+        run: |
+          $version = dotnet msbuild Smpp/Smpp.csproj -getProperty:Version
+          if ($LASTEXITCODE -ne 0 -or $env:GITHUB_REF_NAME -ne "v$version") { throw 'Release version/tag mismatch.' }
+          if ((Get-FileHash "artifacts/SMSGate.$version.nupkg" -Algorithm SHA256).Hash -ne $env:QUALIFIED_PACKAGE_SHA256) { throw 'Package differs from the minimum-runtime qualified bytes.' }
+          "PACKAGE_VERSION=$version" >> $env:GITHUB_ENV
       - name: Get a short-lived NuGet credential
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: login

@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Diagnostics;
 using System.Net.Security;
 using System.Security.Authentication;
 using System.Threading;
@@ -12,6 +13,46 @@ namespace Smpp.Tests
     [TestFixture]
     public class CompatibilityTests
     {
+        [Test]
+        public void StopwatchConversionPreservesSubMillisecondPrecision()
+        {
+            var elapsed = RuntimeCompatibility.StopwatchTicksToTimeSpan(Stopwatch.Frequency / 2000);
+            Assert.That(elapsed.TotalMilliseconds, Is.InRange(0.49, 0.51));
+            Assert.That(elapsed.Ticks % TimeSpan.TicksPerMillisecond, Is.Not.Zero);
+        }
+
+        [Test]
+        public void PortableTlsAssignmentSnapshotsSettingsAndCertificateCollections()
+        {
+            var portable = new SmppTlsClientOptions { TargetHost = "before.example" };
+            using var client = new Client("snapshot", new Smpp.Events.GateEvents(), false);
+            client.TlsOptions = portable;
+            var options = new SmppClientOptions { TlsOptions = portable };
+            portable.TargetHost = "after.example";
+            portable.CheckCertificateRevocation = false;
+            using var certificates = new TlsTests.Certificates();
+            portable.ClientCertificates.Add(certificates.Server);
+            Assert.That(client.TlsOptions.TargetHost, Is.EqualTo("before.example"));
+            Assert.That(options.TlsOptions.TargetHost, Is.EqualTo("before.example"));
+            Assert.That(client.TlsOptions.ClientCertificates, Is.Empty);
+            Assert.That(options.TlsOptions.ClientCertificates, Is.Empty);
+#if NETFRAMEWORK
+            Assert.That(client.TlsOptions.CheckCertificateRevocation, Is.True);
+#else
+            Assert.That(client.TlsOptions.CertificateRevocationCheckMode, Is.EqualTo(System.Security.Cryptography.X509Certificates.X509RevocationMode.Online));
+#endif
+        }
+
+        [Test]
+        public void AssemblyIdentityMatchesTheTargetContract()
+        {
+            var token = typeof(Client).Assembly.GetName().GetPublicKeyToken();
+#if NETFRAMEWORK
+            Assert.That(BitConverter.ToString(token).Replace("-", "").ToLowerInvariant(), Is.EqualTo("4a6828ca32ee5c95"));
+#else
+            Assert.That(token, Is.Empty, "Preserve the identity of published modern .NET assemblies.");
+#endif
+        }
         [Test]
         public void EveryOctetAndMixedCaseHexRoundTrips()
         {
@@ -70,6 +111,29 @@ namespace Smpp.Tests
         }
 
 #if NETFRAMEWORK
+        [Test]
+        public async Task CompletionWaitsForAnAbortInProgressAndReportsCancellation()
+        {
+            using var cancellation = new CancellationTokenSource();
+            using var abortStarted = new ManualResetEventSlim();
+            using var releaseAbort = new ManualResetEventSlim();
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var waiting = FrameworkAsync.WithCancellation(() => completion.Task, () =>
+            {
+                abortStarted.Set();
+                releaseAbort.Wait(TimeSpan.FromSeconds(5));
+            }, cancellation.Token);
+            var cancelling = Task.Run(cancellation.Cancel);
+            try
+            {
+                Assert.That(abortStarted.Wait(TimeSpan.FromSeconds(3)), Is.True);
+                completion.SetResult(true);
+            }
+            finally { releaseAbort.Set(); }
+            await cancelling;
+            Assert.ThrowsAsync<OperationCanceledException>(async () => await waiting.WaitAsync(TimeSpan.FromSeconds(3)));
+        }
+
         private sealed class OwnedResource : IDisposable
         {
             internal bool Disposed;

@@ -11,11 +11,13 @@ namespace Smpp
         internal static TimeSpan GetElapsedTime(long startingTimestamp)
         {
 #if NETFRAMEWORK
-            return TimeSpan.FromSeconds((Stopwatch.GetTimestamp() - startingTimestamp) / (double)Stopwatch.Frequency);
+            return StopwatchTicksToTimeSpan(Stopwatch.GetTimestamp() - startingTimestamp);
 #else
             return Stopwatch.GetElapsedTime(startingTimestamp);
 #endif
         }
+        internal static TimeSpan StopwatchTicksToTimeSpan(long ticks) =>
+            TimeSpan.FromTicks((long)(ticks * ((double)TimeSpan.TicksPerSecond / Stopwatch.Frequency)));
 #if NETFRAMEWORK
         private static readonly Random Random = new Random();
 #endif

@@ -26,7 +26,7 @@ The NuGet package is `SMSGate`; the assembly and namespaces are `Smpp`. Versions
    python scripts/interop.py examples/InteropPeer/bin/Release/net10.0/InteropPeer.dll
    ```
 
-4. Confirm that both configurations executed tests with no failures or unexpected skips, that the local exchange, provider features, hosted service, and both Python peer directions passed, and that API compatibility validation passed without suppressions. On Windows, restore and run `examples/FrameworkExchange` against the local package using `scripts/restore-framework-example.ps1` and an empty `NUGET_PACKAGES` directory. Run the Framework suite and consumer on actual Framework 4.7.2 as described in [FRAMEWORK_SUPPORT.md](FRAMEWORK_SUPPORT.md#validation); newer-runtime CI alone does not qualify the minimum runtime. Retain the runtime report and hashes for the exact release package. Python 3 is required only for the independent peer check and uses its standard library. Use a fresh NuGet package cache when revalidating an already-cached development version.
+4. Confirm that both configurations executed tests with no failures or unexpected skips, that the local exchange, provider features, hosted service, and both Python peer directions passed, and that API compatibility validation passed without suppressions. On Windows, restore and run `examples/FrameworkExchange` using `scripts/restore-framework-example.ps1`, which creates a fresh cache for each invocation. Verify the Framework strong-name signature and build the signed example with warnings treated as errors. Before publication, run the Framework suite and consumer on actual Framework 4.7.2 against the canonical tag artifact as described below; newer-runtime CI alone does not qualify the minimum runtime. Python 3 is required only for the independent peer check and uses its standard library.
 5. Inspect the `.nupkg` for both `lib/net10.0/Smpp.dll` and `lib/net472/Smpp.dll`, XML API documentation for both targets, README, license, changelog, embedded `icon.png`, and the intended metadata. Confirm the package icon metadata points to `icon.png`, its PNG dimensions are 128 x 128, and its bytes match `assets/branding/smsgate-icon.png`. Confirm `repository.commit` matches the release commit, the .NET 10 dependency group is empty, and only the intended Microsoft compatibility packages appear in the Framework group. Reference assemblies and test dependencies must not appear as consumer dependencies. The `.snupkg` contains portable debug symbols for both targets. Neither package should contain tests or build caches. CI validates on Windows and Linux; keep both platforms passing before tagging.
 
 ## Publish with GitHub Actions
@@ -48,9 +48,21 @@ git tag -a v1.2.0 -m "SMSGate 1.2.0"
 git push origin v1.2.0
 ```
 
-The validation job requires the tagged commit to be on `master` and the tag to match the package version. It runs .NET 10 Debug and Release tests and the package consumers, then uploads the packages. A second Windows job runs Framework Debug/Release tests and its package consumer on the installed runtime. Publishing requires both jobs to succeed. The publishing job then enters the `nuget` environment, downloads the validated package artifact by ID, requests a temporary credential through `NuGet/login`, pushes the package and accompanying symbols, and creates a GitHub release. Only the publishing job has OIDC token permission. Publishing is serialized across releases. The separate actual-4.7.2 evidence in the preparation checklist remains required before tagging.
+The tag push validates without publishing. The tagged commit must be on `master` and the tag must match the package version. The Linux job runs .NET 10 Debug/Release tests and package consumers, then uploads one canonical package artifact. The dependent Windows job runs Framework Debug/Release tests, downloads that same artifact, restores the signed consumer from it, and runs the full package-based Framework suite with its extracted `lib/net472/Smpp.dll`. The bundle script checks the consumer and test assembly hashes against the package. The `framework-test-results` artifact includes this runnable qualification bundle.
 
-The workflow supports retrying a tag through **Run workflow**; duplicate NuGet versions are skipped. Select the existing tag when retrying. Branch runs do not publish. Do not move an existing release tag to different source.
+After both jobs succeed, download `nuget-packages` and `framework-test-results` from that tag validation run. Run its bundle on actual Framework 4.7.2 with `scripts/qualify-framework.ps1 -RequireFramework472`. Require a passing report, the complete test count with zero skips, the separate package consumer, and the package SHA-256 matching the downloaded `.nupkg`. Preserve `runtime.json`, `tests.xml`, consumer output, and the package. Do not rebuild or repack between qualification and publishing.
+
+Publish the qualified artifact by dispatching the same workflow on the existing tag:
+
+```bash
+gh workflow run release.yml --ref v1.2.0 \
+  -f validation_run_id=VALIDATION_RUN_ID \
+  -f qualified_package_sha256=SHA256_FROM_RUNTIME_JSON
+```
+
+This publishing run checks that the referenced successful Release run belongs to the exact tag/commit and contains successful `validate` and `validate-framework` jobs. It downloads the immutable package artifact by ID and verifies its SHA-256 before requesting any publishing credential. The `nuget` job then uses `NuGet/login`, publishes the package and symbols, and creates a GitHub release. Only that job has OIDC token permission. Publication is serialized. Attach the minimum-runtime reports and hashes to the GitHub release after publishing so release evidence remains available after Actions artifact retention expires.
+
+To retry validation, dispatch on the existing tag with both inputs empty. To retry publishing, use the same validated run ID and qualified hash; duplicate NuGet versions are skipped. Branch validation runs do not publish. Do not move an existing release tag to different source.
 
 ## Publish from a development environment
 

@@ -15,8 +15,6 @@
 
 SMSGate is a lightweight **SMPP 3.4 client and server library for .NET 10 and .NET Framework 4.7.2+**. Build SMS services with asynchronous submissions, delivery tracking, and control over incoming message acknowledgements. The .NET 10 target has no package dependencies; Framework uses Microsoft compatibility packages.
 
-**Source status:** this branch prepares **1.2.0**, including Framework support. The published **1.1.1** package supports .NET 10 only. Until 1.2.0 is released, build and pack this source to use the Framework target.
-
 - **Send and receive:** client and server sessions, multipart SMS, GSM-7, Unicode, binary messages, and WAP Push.
 - **Track delivery:** per-segment provider IDs, text and TLV receipts, and aggregate multipart delivery status.
 - **Control traffic:** bounded async queues, PDU rate and window limits, and explicit submission outcomes.

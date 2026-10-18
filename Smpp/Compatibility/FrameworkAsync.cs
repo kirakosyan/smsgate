@@ -23,8 +23,9 @@ namespace Smpp
             {
                 try { await operation().ConfigureAwait(false); }
                 catch (Exception) when (cancellation.IsCancellationRequested) { throw new OperationCanceledException(cancellation); }
-                cancellation.ThrowIfCancellationRequested();
             }
+            // Dispose waits for an in-progress abort before success can transfer ownership.
+            cancellation.ThrowIfCancellationRequested();
         }
         // A successful accept transfers ownership only after cancellation has been checked.
         internal static async Task<T> WithCancellation<T>(Func<Task<T>> operation, Action abort, CancellationToken cancellation) where T : class, IDisposable

@@ -1,6 +1,6 @@
 # .NET Framework support
 
-SMSGate 1.2.0 (currently unreleased) adds `net472` alongside `net10.0`. Framework 4.7.2 is the minimum target; 4.8 and 4.8.1 applications use that assembly through Framework's in-place compatibility. Framework is Windows-only. The operating system must remain supported for the runtime you deploy.
+SMSGate 1.2.0 adds `net472` alongside `net10.0`. Framework 4.7.2 is the minimum target; 4.8 and 4.8.1 applications use that assembly through Framework's in-place compatibility. Framework is Windows-only. The operating system must remain supported for the runtime you deploy.
 
 ## Application setup
 
@@ -36,6 +36,8 @@ Only the Framework target depends on these Microsoft packages:
 
 NuGet also restores their transitive dependencies. `Microsoft.NETFramework.ReferenceAssemblies.net472` 1.0.3 is private and build-only. The `net10.0` dependency group stays empty. Deploy the application's generated configuration and dependency assemblies together; do not copy only `Smpp.dll` into an existing application.
 
+The new Framework assembly is strong-named with public key token `4a6828ca32ee5c95`. The signed FrameworkExchange package consumer builds with warnings treated as errors. Its signing key is checked in for reproducible open-source builds; strong naming supplies assembly identity, not publisher authentication. Keep this key stable. The existing .NET 10 assembly retains its unsigned identity to preserve compatibility with already compiled consumers.
+
 ## TLS on both targets
 
 Shared source can use the portable options:
@@ -64,6 +66,10 @@ Server.StartAsync("0.0.0.0", 2776, new SmppTlsServerOptions
 
 The existing .NET 10 API remains compatible with 1.1.1. Framework's older TLS stack cannot expose every modern .NET authentication option. TLS protocol availability depends on the installed runtime, OS, and policy; targeting 4.7.2 does not itself enable TLS 1.3.
 
+Configure portable options fully before assigning them. Both targets snapshot scalar settings and copy the client certificate collection at assignment (or when starting a listener). Later changes to the original options or additions to its collection do not affect the assigned settings. Certificate objects and callback delegates remain shared, so keep their resources valid for the connection/listener lifetime. On .NET 10 the conversion creates native options; assigning an existing native options object retains the original .NET 10 reference behavior.
+
+These are source-compatible target-specific APIs, not a binary migration bridge. A precompiled `net472` class library that calls TLS members must be rebuilt for modern .NET: the property/parameter types and Framework assembly identity differ. Do not rely on a `NU1701` fallback to load such a binary into a .NET 10 application. Multi-target shared source and let NuGet choose the matching SMSGate assembly.
+
 ## Validation
 
 The shared NUnit suite runs under both targets. Windows CI executes Framework tests on its installed newer Framework runtime, and runs `examples/FrameworkExchange` against a packed NuGet package in an isolated package cache. Linux CI builds both assemblies and runs the .NET 10 tests. Framework tests include TLS trust/hostname rejection, stalled-handshake cancellation, framing, reconnects, queue/window/rate limits, multipart tracking, metrics, and shutdown.
@@ -79,7 +85,7 @@ The script verifies the actual registry version, package assembly identity, full
 
 ## Run the local package example
 
-On Windows, before 1.2.0 is published:
+On Windows, to test a package built from this checkout:
 
 ```powershell
 dotnet pack Smpp/Smpp.csproj -c Release -o artifacts
@@ -88,5 +94,7 @@ dotnet run --project examples/FrameworkExchange -c Release --no-restore
 ```
 
 The example uses `SmppGateway`, two GSM-7 segments, per-segment provider IDs, complete delivery tracking, and graceful shutdown. It needs no SMS provider account.
+
+The restore helper creates a fresh package directory for every invocation, so repeated builds of the same package version cannot reuse an older cached SMSGate assembly. The resulting assets file records that directory for the subsequent `--no-restore` run.
 
 References: [Framework version compatibility](https://learn.microsoft.com/dotnet/framework/install/versions-and-dependencies), [Framework TLS guidance](https://learn.microsoft.com/dotnet/framework/network-programming/tls), [Framework lifecycle](https://learn.microsoft.com/lifecycle/faq/dotnet-framework).

@@ -1,6 +1,6 @@
 # Framework validation evidence
 
-Development validation for the upcoming SMSGate 1.2.0, performed on 2026-10-18. This is not a published release qualification. Rebuild and retain evidence for the exact committed release package before tagging.
+Historical development validation for SMSGate 1.2.0, performed on 2026-10-18, before the final review fixes and Framework signing. These results describe the code commit and development artifact identified below. The final release's canonical package, minimum-runtime report, hashes, and public-feed verification are retained with the [1.2.0 GitHub release](https://github.com/kirakosyan/smsgate/releases/tag/v1.2.0). Follow [RELEASING.md](RELEASING.md) to qualify the exact tag artifact before publishing; do not substitute these older reports.
 
 | Environment | Configuration | Result |
 | --- | --- | --- |

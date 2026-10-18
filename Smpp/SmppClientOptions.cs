@@ -25,7 +25,14 @@ namespace Smpp
         public int DestinationNpi { get; init; } = 1;
         public int ResponseTimeoutMilliseconds { get; init; } = 10000;
         public int ReconnectDelayMilliseconds { get; init; } = 10000;
+#if NETFRAMEWORK
+        private SslClientAuthenticationOptions tlsOptions;
+        /// <summary>Optional TLS settings. Configure before assignment; scalar settings and the certificate collection are snapshotted.</summary>
+        public SslClientAuthenticationOptions TlsOptions { get => tlsOptions; init => tlsOptions = value?.Snapshot(); }
+#else
+        /// <summary>Optional TLS settings. Converting portable options snapshots scalar settings and the certificate collection. Native options retain their usual reference semantics.</summary>
         public SslClientAuthenticationOptions TlsOptions { get; init; }
+#endif
         public SubmissionOptions Submission { get; init; } = new();
         public DeliveryTrackingStore DeliveryStore { get; init; }
         public void Validate()

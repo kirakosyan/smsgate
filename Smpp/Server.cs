@@ -71,14 +71,15 @@ namespace Smpp
         {
             if (!IPAddress.TryParse(ip, out var address))
                 throw new ArgumentException("Check IP address", nameof(ip));
-            if (tlsOptions != null && tlsOptions.ServerCertificate == null
-#if !NETFRAMEWORK
-                && tlsOptions.ServerCertificateContext == null &&
-                tlsOptions.ServerCertificateSelectionCallback == null)
+#if NETFRAMEWORK
+            tlsOptions = tlsOptions?.Snapshot();
+            if (tlsOptions != null && tlsOptions.ServerCertificate == null)
+                throw new ArgumentException("TLS listeners require a server certificate.", nameof(tlsOptions));
 #else
-                )
-#endif
+            if (tlsOptions != null && tlsOptions.ServerCertificate == null && tlsOptions.ServerCertificateContext == null &&
+                tlsOptions.ServerCertificateSelectionCallback == null)
                 throw new ArgumentException("TLS listeners require a server certificate or a certificate selection callback.", nameof(tlsOptions));
+#endif
             lock (ListenerLock)
             {
                 if (running)

@@ -8,6 +8,10 @@
     <!-- The legacy integration fixtures share a fixed TCP port across target processes. -->
     <TestTfmsInParallel>false</TestTfmsInParallel>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net472'">
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>../Smpp/SMSGate.snk</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net472" Version="1.0.3" PrivateAssets="all" />
