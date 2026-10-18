@@ -2,6 +2,15 @@
 
 This project uses [Semantic Versioning](https://semver.org/). Released versions are tagged as `vMAJOR.MINOR.PATCH`.
 
+## 1.1.1 - 2026-10-18
+
+- New SMSGate logo, editable vector artwork, and an embedded 128 x 128 NuGet package icon.
+- Consistent CI, NuGet, runtime, license, and operating system badges, with platform icon attribution.
+- A support matrix identifying Windows/Linux CI coverage, unvalidated macOS, and the .NET 10 runtime requirement.
+- A modern `SmppGateway`, `ConnectAndBindAsync`, and `SubmitAsync` quick start, with service examples and clearer submission-versus-delivery guidance.
+
+This patch updates branding, documentation, and package metadata. It does not change the protocol API or runtime behavior; the package still targets `net10.0` only.
+
 ## 1.1.0 - 2026-10-17
 
 - Explicit GSM-7 encoding and decoding with default/extension alphabet support, septet-aware segmentation, and `auto` Unicode fallback on connection submissions.

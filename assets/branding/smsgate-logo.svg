@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="160" viewBox="0 0 640 160" role="img" aria-labelledby="title desc">
+  <title id="title">SMSGate - SMPP client and server for .NET</title>
+  <desc id="desc">The SMSGate gateway and message mark beside a navy and teal wordmark.</desc>
+  <rect x="0.5" y="0.5" width="639" height="159" rx="20" fill="#F1F5F9" stroke="#DCE5ED"/>
+  <g transform="translate(24 24) scale(.875)">
+    <rect width="128" height="128" rx="28" fill="#102A43"/>
+    <path d="M35 96V37a9 9 0 0 1 9-9h33" fill="none" stroke="#3AD9C5" stroke-width="10" stroke-linecap="round"/>
+    <path d="M59 46h32a11 11 0 0 1 11 11v18a11 11 0 0 1-11 11H73L57 99V86a10 10 0 0 1-9-10V57a11 11 0 0 1 11-11Z" fill="#FFFFFF"/>
+    <g fill="#102A43">
+      <circle cx="62" cy="66" r="3.5"/>
+      <circle cx="75" cy="66" r="3.5"/>
+      <circle cx="88" cy="66" r="3.5"/>
+    </g>
+  </g>
+  <text x="164" y="93" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="68" font-weight="700" letter-spacing="-2"><tspan fill="#102A43">SMS</tspan><tspan fill="#007F78">Gate</tspan></text>
+  <text x="168" y="122" fill="#486581" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="15" font-weight="600" letter-spacing="1.5">SMPP CLIENT &amp; SERVER FOR .NET</text>
+</svg>
