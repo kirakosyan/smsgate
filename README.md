@@ -7,7 +7,7 @@
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4.svg?style=for-the-badge)](#supported-platforms)
 [![.NET Framework 4.7.2+](https://img.shields.io/badge/.NET_Framework-4.7.2%2B-512BD4.svg?style=for-the-badge)](#supported-platforms)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge)](https://github.com/kirakosyan/smsgate/blob/master/LICENSE)
-[![Sponsor on Patreon](https://img.shields.io/badge/Sponsor-Patreon-FF424D.svg?style=for-the-badge&logo=patreon&logoColor=white)](https://patreon.com/ArmenKirakosyan?utm_medium=unknown&utm_source=join_link&utm_campaign=creatorshare_creator&utm_content=copyLink)
+[![Sponsor on Patreon](https://img.shields.io/badge/Sponsor-Patreon-FF424D.svg?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/16981794/join)
 
 [![Windows: covered by .NET 10 CI](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows-ci.svg)](#supported-platforms)
 [![Linux: covered by .NET 10 CI](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/linux-ci.svg)](#supported-platforms)
