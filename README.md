@@ -1,80 +1,46 @@
 # SMSGate - SMPP client and server for .NET
 
-[![CI](https://github.com/kirakosyan/smsgate/actions/workflows/ci.yml/badge.svg)](https://github.com/kirakosyan/smsgate/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/SMSGate.svg)](https://www.nuget.org/packages/SMSGate)
-[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/kirakosyan/smsgate/blob/master/LICENSE)
+![SMSGate - SMPP client and server for .NET](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/smsgate-logo.png)
 
-SMSGate is a lightweight, dependency-free SMPP 3.4 client and server library for **.NET 10**. Use its event-driven API to send and receive SMS, process delivery receipts, handle multipart messages, and test SMPP sessions locally.
+[![CI](https://img.shields.io/github/actions/workflow/status/kirakosyan/smsgate/ci.yml?branch=master&style=for-the-badge&label=CI)](https://github.com/kirakosyan/smsgate/actions/workflows/ci.yml)
+[![NuGet](https://img.shields.io/nuget/v/SMSGate.svg?style=for-the-badge)](https://www.nuget.org/packages/SMSGate)
+[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4.svg?style=for-the-badge)](#supported-platforms)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge)](https://github.com/kirakosyan/smsgate/blob/master/LICENSE)
 
-SMSGate **1.1.0** adds opt-in GSM-7 encoding, complete multipart delivery tracking, TLS, and application-controlled acknowledgements. The [provider integration guide](https://github.com/kirakosyan/smsgate/blob/v1.1.0/docs/PROVIDER_INTEGRATION.md) and [runnable TLS example](https://github.com/kirakosyan/smsgate/tree/v1.1.0/examples/ProviderFeatures) cover these features. For new services, start with `SmppGateway`, validated client options, and `SubmitAsync` for bounded queues, PDU rate/window limits, explicit bind/submission results, shared TX/RX tracking, graceful shutdown, and metrics; see the [service integration guide](https://github.com/kirakosyan/smsgate/blob/v1.1.0/docs/SERVICE_INTEGRATION.md).
+[![Windows: covered by .NET 10 CI](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows-ci.svg)](#supported-platforms)
+[![Linux: covered by .NET 10 CI](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/linux-ci.svg)](#supported-platforms)
+[![macOS: not yet validated](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/macos-unverified.svg)](#supported-platforms)
+
+SMSGate is a lightweight, dependency-free **SMPP 3.4 client and server library for .NET 10**. Build SMS services with asynchronous submissions, delivery tracking, and control over incoming message acknowledgements.
+
+- **Send and receive:** client and server sessions, multipart SMS, GSM-7, Unicode, binary messages, and WAP Push.
+- **Track delivery:** per-segment provider IDs, text and TLV receipts, and aggregate multipart delivery status.
+- **Control traffic:** bounded async queues, PDU rate and window limits, and explicit submission outcomes.
+- **Operate services:** optional TLS, storage before acknowledgement, graceful shutdown, structured diagnostics, and metrics.
+
+[Quick start](#quick-start) · [Supported platforms](#supported-platforms) · [Service integration](https://github.com/kirakosyan/smsgate/blob/master/docs/SERVICE_INTEGRATION.md) · [Provider integration](https://github.com/kirakosyan/smsgate/blob/master/docs/PROVIDER_INTEGRATION.md) · [Changelog](https://github.com/kirakosyan/smsgate/blob/master/CHANGELOG.md)
 
 ## Install
 
 ```bash
-dotnet add package SMSGate --version 1.1.0
+dotnet add package SMSGate --version 1.1.1
 ```
 
-The NuGet package is named `SMSGate`. The assembly and namespaces remain `Smpp`, so application code uses `using Smpp;` and `using Smpp.Events;`. This release targets `net10.0`; it does not target .NET Framework or earlier .NET versions.
+The NuGet package is named `SMSGate`; the assembly and namespaces are `Smpp`. Applications consuming this release require **.NET 10**.
 
-See the [changelog](https://github.com/kirakosyan/smsgate/blob/master/CHANGELOG.md) for release details and the [local exchange example](https://github.com/kirakosyan/smsgate/tree/master/examples/LocalExchange) for a complete runnable client/server exchange with Unicode messages and a delivery receipt.
+## Supported platforms
 
-### Upgrading from 1.0.0
+| Operating system | .NET 10 (`net10.0`) | Validation |
+| --- | --- | --- |
+| ![Windows](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows.svg) Windows | Supported | Debug/Release tests and package examples in Windows CI |
+| ![Linux](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/linux.svg) Linux | Supported | Debug/Release tests and package examples in Ubuntu CI |
+| ![macOS](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/macos.svg) macOS | Not yet qualified | No macOS CI lane |
 
-Existing APIs, event signatures, plain TCP, automatic acknowledgements, and inbound alphabet defaults remain available. Enable `UseGsm7` only when your provider uses the GSM default alphabet for DCS 0. Configure TLS and an `InboundMessageHandler` explicitly when required. Legacy `SubmitSm` bypasses the new queue limits; use `SubmitAsync` consistently when those limits must apply to all submissions. Queues and delivery tracking are held in memory, so keep a durable application outbox and duplicate policy when recovery across process restarts is required.
+This release targets `net10.0` only. **.NET Framework and earlier .NET versions are not supported.** CI does not currently include dedicated ARM64 qualification. Platform support requires an operating system supported by .NET 10; the package itself contains no native libraries.
 
-## Overview
+## Quick start
 
-The library is organized around four main types:
-
-- `SmppGateway` owns client connections and provides graceful shutdown for services and dependency injection.
-- `Gate` is the legacy entry point used to register connections and share a single `GateEvents` instance.
-- `Client` opens an outbound SMPP session and binds as receiver, transmitter, or transceiver depending on configuration.
-- `Server` registers accepted credentials and hosts a static TCP listener that authenticates inbound binds.
-
-Out of the box, the implementation supports:
-
-- outbound `submit_sm`
-- server-originated `deliver_sm` or `data_sm`
-- text and TLV delivery reports via `deliver_sm` and `data_sm`, with per-part and aggregate tracking
-- multipart and long-message handling
-- ASCII, GSM-7, Latin, Unicode, binary, and WAP Push body formats
-- optional TLS and storage before per-PDU acknowledgement
-- bounded asynchronous submissions, PDU rate/window controls, and explicit outcome uncertainty
-- command-level logging, structured diagnostics, metrics, and application callbacks via events
-
-## Solution Layout
-
-- `Smpp/` - the SMPP library
-- `Smpp.Tests/` - NUnit-based command and integration tests
-- `examples/LocalExchange/` - a runnable example that consumes the NuGet package
-- `examples/ProviderFeatures/` - validated TLS, GSM-7 multipart delivery, and storage before acknowledgement
-- `examples/WorkerService/` - Generic Host/DI, bounded async sends, and graceful shutdown
-- `examples/InteropPeer/` and `scripts/interop.py` - independent SMPP wire exchange
-
-## Requirements
-
-- .NET 10 SDK matching [global.json](https://github.com/kirakosyan/smsgate/blob/master/global.json) for development
-
-Applications consuming the package require .NET 10. Building and running the test suite needs no SMS provider account or external service: integration tests use local TCP listeners. Run test configurations sequentially and keep loopback port 2775 free.
-
-The project files in this repository target `net10.0`. Build artifacts for other frameworks may exist in `bin/` or `obj/`, but they are not the source-of-truth targets.
-
-## Build
-
-```bash
-dotnet restore
-dotnet build SMSGate.sln -warnaserror
-```
-
-## Test
-
-```bash
-dotnet test SMSGate.sln -warnaserror
-```
-
-## Quick Start
-
-The example below starts an in-process SMPP server, connects a client, subscribes to the available events, sends messages in both directions, and shuts everything down cleanly.
+Create a .NET 10 console application, install the package, and set `SMPP_HOST`, `SMPP_PORT`, `SMPP_SYSTEM_ID`, `SMPP_PASSWORD`, `SMPP_SENDER`, and `SMPP_RECIPIENT` for your provider account. The example connects over TCP, waits for a successful bind, submits a message through the bounded async queue, and prints each segment's provider response.
 
 ```csharp
 using System;
@@ -82,72 +48,85 @@ using System.Threading;
 using Smpp;
 using Smpp.Events;
 
+static string Setting(string name) =>
+    Environment.GetEnvironmentVariable(name)
+    ?? throw new InvalidOperationException($"Set {name} before running.");
+
 var eventsHub = new GateEvents();
-
-eventsHub.Event += (level, description) =>
+await using var gateway = new SmppGateway(eventsHub);
+var client = gateway.AddClient(new SmppClientOptions
 {
-	Console.WriteLine($"[{level}] {description}");
-};
+    ChannelName = "provider",
+    Host = Setting("SMPP_HOST"),
+    Port = int.Parse(Setting("SMPP_PORT")),
+    SystemId = Setting("SMPP_SYSTEM_ID"),
+    Password = Setting("SMPP_PASSWORD"),
+    Submission = new SubmissionOptions
+    {
+        QueueCapacity = 100,
+        MaxInFlightPdus = 5,
+        PdusPerSecond = 20
+    }
+});
 
-eventsHub.ChannelEvent += (channelName, description, pdu) =>
-{
-	Console.WriteLine($"[{channelName}] {description}");
-};
+using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+var bind = await client.ConnectAndBindAsync(deadline.Token);
+if (!bind.Bound)
+    throw new InvalidOperationException($"SMPP bind failed: {bind.CommandStatus}");
 
-eventsHub.MessageStatusEvent += (messageId, status, responseMessageId) =>
-{
-	Console.WriteLine($"Message {messageId}: {status} ({responseMessageId})");
-};
+var result = await client.SubmitAsync(new OutboundMessage(
+    MessageId: 42,
+    Sender: Setting("SMPP_SENDER"),
+    Recipient: Setting("SMPP_RECIPIENT"),
+    Body: "Hello from SMSGate"), deadline.Token);
 
-eventsHub.MessageDeliveryReportEvent += (responseMessageId, status) =>
-{
-	Console.WriteLine($"Delivery report {responseMessageId}: {status}");
-};
-
-eventsHub.NewMessageEvent += (channelName, messageId, sender, recipient, body, bodyFormat, registeredDelivery) =>
-{
-	Console.WriteLine($"[{channelName}] {sender} -> {recipient}: {body}");
-};
-
-var gate = new Gate(eventsHub);
-
-// Register credentials that the server will accept.
-var server = gate.AddServerConnection("server-main", "sysId", "sysPass");
-server.use_deliver_sm = true;
-server.registered_delivery = 1;
-
-Server.StartAsync("127.0.0.1", 2775);
-
-var client = gate.AddClientConnection("client-main", "127.0.0.1", 2775, "sysId", "sysPass");
-client.debug = true;
-client.direction_in = true;
-client.direction_out = true;
-
-if (!client.Connect() ||
-    !SpinWait.SpinUntil(() => client.connected, TimeSpan.FromSeconds(10)))
-{
-    Console.WriteLine("Client could not bind.");
-    client.Quit();
-    Server.Stop();
-    return;
-}
-
-client.SubmitSm(1, "47975091981", "97509181", "Hello from client", "ascii", true);
-server.SubmitSm(2, "4755555", "47666666", "Hello from server", "ascii", true);
-
-server.SubmitDeliveryReport("1", Common.MessageStatus.delivered_ACK_received);
-
-Thread.Sleep(1000);
-
-client.Quit();
-Server.Stop();
+Console.WriteLine($"Submission: {result.Outcome}");
+if (!result.Accepted)
+    Console.WriteLine($"May have been accepted: {result.MayHaveBeenAccepted}");
+foreach (var part in result.Parts)
+    Console.WriteLine($"Part {part.PartNumber}: {part.ProviderMessageId}, SMPP {part.CommandStatus}");
 ```
+
+`Accepted` confirms successful provider submission. Handset delivery is reported separately through `MessageDeliveryStatusEvent`; keep your service connected to receive receipts. An unknown outcome may already have been accepted by the provider, so check `MayHaveBeenAccepted` before deciding how to retry. `await using` drains pending work and closes the gateway when the example ends.
+
+For a TLS endpoint, configure `TlsOptions` with the provider's certificate hostname and port. Match the provider's TON/NPI, GSM-7, rate, and window settings using the [provider guide](https://github.com/kirakosyan/smsgate/blob/master/docs/PROVIDER_INTEGRATION.md). Credentials belong in your application's configuration or secret provider.
+
+### Runnable examples
+
+These examples use a local SMPP peer and need no provider account:
+
+| Example | Demonstrates |
+| --- | --- |
+| [WorkerService](https://github.com/kirakosyan/smsgate/tree/master/examples/WorkerService) | `SmppGateway`, `SubmitAsync`, Generic Host/DI, delivery tracking, and graceful shutdown |
+| [ProviderFeatures](https://github.com/kirakosyan/smsgate/tree/master/examples/ProviderFeatures) | Validated TLS, GSM-7 multipart messages, and storage before acknowledgement |
+| [LocalExchange](https://github.com/kirakosyan/smsgate/tree/master/examples/LocalExchange) | A complete client/server exchange using the legacy `Gate` API |
+| [InteropPeer](https://github.com/kirakosyan/smsgate/tree/master/examples/InteropPeer) | Independent Python SMPP wire exchanges in both directions |
+
+```bash
+dotnet run --project examples/WorkerService --configuration Release
+```
+
+Run that command from a clone of this repository. See the [service integration guide](https://github.com/kirakosyan/smsgate/blob/master/docs/SERVICE_INTEGRATION.md) for lifecycle, delivery tracking, diagnostics, and persistence guidance.
+
+### Upgrading from 1.0.0
+
+SMSGate **1.1.0** adds opt-in GSM-7 encoding, complete multipart delivery tracking, TLS, and application-controlled acknowledgements. Existing APIs, event signatures, plain TCP, automatic acknowledgements, and inbound alphabet defaults remain available. Enable `UseGsm7` only when your provider uses the GSM default alphabet for DCS 0. Configure TLS and an `InboundMessageHandler` explicitly when required. Legacy `SubmitSm` bypasses the new queue limits; use `SubmitAsync` consistently when those limits must apply to all submissions. Queues and delivery tracking are held in memory, so keep a durable application outbox and duplicate policy when recovery across process restarts is required.
+
+## API overview
+
+- `SmppGateway` owns client connections and provides graceful shutdown for services and dependency injection.
+- `SmppClientOptions` validates provider configuration before creating a client.
+- `Client.ConnectAndBindAsync()` waits for the bind response; `Client.SubmitAsync()` queues submissions and returns per-PDU outcomes.
+- `Gate` is the legacy entry point used to register connections and share a single `GateEvents` instance.
+- `Server` registers accepted credentials and hosts a static TCP listener that authenticates inbound binds.
 
 ## Connection Model
 
 ### Client
 
-Create a client with `Gate.AddClientConnection(...)` and then call `Connect()` or await `ConnectAsync()`. A true return value means the TCP connection opened and the bind request was sent. Wait for `connected == true` before submitting messages; it becomes true only after the matching successful bind response. Concurrent connect calls share one attempt. Connection attempts run outside the session lock, and `Quit()` cancels an in-progress attempt.
+Create an instance-owned client with `SmppGateway.AddClient(...)` and await `ConnectAndBindAsync()` before calling `SubmitAsync()`. The returned `BindResult.Bound` confirms the provider accepted the bind.
+
+The legacy `Gate.AddClientConnection(...)`, `Connect()`, and `ConnectAsync()` APIs remain available. A true return value from `Connect()` or `ConnectAsync()` means the TCP connection opened and the bind request was sent. Wait for `connected == true` before submitting messages through that API; it becomes true only after the matching successful bind response. Concurrent connect calls share one attempt. Connection attempts run outside the session lock, and `Quit()` cancels an in-progress attempt.
 
 EOF, socket errors, rejected binds, invalid frame lengths, and unanswered bind or keepalive requests trigger a reconnect after `reconnectDelay`. Only one retry is scheduled per connection. A late message acknowledgement expires that submission without disconnecting or timing out other messages. `Quit()` cancels retries, closes the session, and unregisters the client permanently.
 
@@ -167,7 +146,9 @@ Each registered server channel acts as an allowed credential pair. During bind, 
 
 ## Sending Messages
 
-Both `Client` and `Server` expose `SubmitSm(...)`.
+For client services, use `Client.SubmitAsync(...)` as shown in the quick start. It applies the configured queue, rate, and window limits and returns a `SubmissionResult` with every segment's response. See the [service guide](https://github.com/kirakosyan/smsgate/blob/master/docs/SERVICE_INTEGRATION.md) for outcome handling and retry rules.
+
+Both `Client` and `Server` also expose the legacy direct-send `SubmitSm(...)` API below. It bypasses the async queue's limits.
 
 ```csharp
 int result = client.SubmitSm(
@@ -214,7 +195,7 @@ Multipart reassembly supports `submit_sm`, `deliver_sm`, and `data_sm` and separ
 
 ## Key Configuration Fields
 
-Most tuning is done by assigning public fields on `Client` or `Server` instances before traffic begins.
+For new clients, start with validated `SmppClientOptions` and `SubmissionOptions`. The fields below remain available on `Client` or `Server` for legacy configuration; set them before traffic begins.
 
 | Field | Default | Purpose |
 | --- | --- | --- |
@@ -282,7 +263,7 @@ dotnet test SMSGate.sln --configuration Release -warnaserror
 
 The implementation is usable, but there are several behaviors worth knowing before adopting it in production:
 
-- Connection registries are stored in static global collections, so multiple `Gate` instances share process-wide state.
+- Legacy `Gate` connection registries are stored in static global collections, so multiple `Gate` instances share process-wide state. `SmppGateway` owns its outbound clients independently; the server listener remains static.
 - Connection configuration and the public registries remain mutable. Set configuration before traffic and avoid modifying the registries directly while connections are active.
 - Packed ASCII has no separate septet count in the PDU; a trailing zero septet is treated as padding.
 - Packed GSM-7 uses CR padding; a genuine trailing CR can be ambiguous without a separate septet count. Unpacked GSM-7 is recommended for SMPP providers.
@@ -290,13 +271,20 @@ The implementation is usable, but there are several behaviors worth knowing befo
 
 ## Development Notes
 
-The fastest feedback loop when extending the library is:
+Build from source with the .NET 10 SDK matching [global.json](https://github.com/kirakosyan/smsgate/blob/master/global.json):
+
+```bash
+dotnet restore SMSGate.sln -warnaserror
+dotnet build SMSGate.sln -warnaserror
+```
+
+The solution contains the library in `Smpp/` and NUnit tests in `Smpp.Tests/`. The fastest feedback loop when extending the library is:
 
 ```bash
 dotnet test SMSGate.sln -warnaserror
 ```
 
-That exercises both the command-level tests and the smoke/integration scenarios shipped with the solution.
+That exercises both the command-level tests and the smoke/integration scenarios shipped with the solution. Tests use local TCP listeners and need no SMS provider account or external service. Run configurations sequentially and keep loopback port 2775 free.
 
 To build the NuGet package and verify the example against it locally:
 
@@ -306,7 +294,7 @@ dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifa
 dotnet run --project examples/LocalExchange/LocalExchange.csproj --configuration Release --no-restore
 ```
 
-The package includes this README, the MIT license, release notes, XML API documentation, and a companion symbols package with Source Link. GitHub Actions validates both build configurations and the example before publishing a version tag through NuGet Trusted Publishing. Maintainers can follow the [release guide](https://github.com/kirakosyan/smsgate/blob/master/docs/RELEASING.md).
+The package includes the SMSGate icon, this README, the MIT license, release notes, XML API documentation, and a companion symbols package with Source Link. GitHub Actions validates both build configurations and the examples before publishing a version tag through NuGet Trusted Publishing. Maintainers can follow the [release guide](https://github.com/kirakosyan/smsgate/blob/master/docs/RELEASING.md). Editable logos, PNG exports, and platform icon attribution are in [the branding assets](https://github.com/kirakosyan/smsgate/tree/master/assets/branding).
 
 ## Contributing
 

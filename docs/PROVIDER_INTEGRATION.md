@@ -1,6 +1,6 @@
 # Provider integration
 
-These APIs are available in SMSGate 1.1.0. Install with `dotnet add package SMSGate --version 1.1.0`; use the SDK in `global.json` when building this repository. The library remains dependency-free and targets .NET 10.
+These APIs are available since SMSGate 1.1.0. Install with `dotnet add package SMSGate --version 1.1.1`; use the SDK in `global.json` when building this repository. The library remains dependency-free and targets .NET 10.
 
 Run the complete loopback example with:
 

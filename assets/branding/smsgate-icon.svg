@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">SMSGate</title>
+  <desc id="desc">A teal gateway and a white message bubble on a navy tile.</desc>
+  <rect width="128" height="128" rx="28" fill="#102A43"/>
+  <path d="M35 96V37a9 9 0 0 1 9-9h33" fill="none" stroke="#3AD9C5" stroke-width="10" stroke-linecap="round"/>
+  <path d="M59 46h32a11 11 0 0 1 11 11v18a11 11 0 0 1-11 11H73L57 99V86a10 10 0 0 1-9-10V57a11 11 0 0 1 11-11Z" fill="#FFFFFF"/>
+  <g fill="#102A43">
+    <circle cx="62" cy="66" r="3.5"/>
+    <circle cx="75" cy="66" r="3.5"/>
+    <circle cx="88" cy="66" r="3.5"/>
+  </g>
+</svg>

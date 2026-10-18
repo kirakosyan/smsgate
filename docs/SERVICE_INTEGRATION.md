@@ -1,6 +1,6 @@
 # Running SMSGate in a service
 
-These APIs are available in SMSGate 1.1.0. Install with `dotnet add package SMSGate --version 1.1.0`. They target .NET 10 and add no dependencies to the core package. The existing `Gate`, `Client`, `Server`, synchronous submissions, and event signatures remain available.
+These APIs are available since SMSGate 1.1.0. Install with `dotnet add package SMSGate --version 1.1.1`. They target .NET 10 and add no dependencies to the core package. The existing `Gate`, `Client`, `Server`, synchronous submissions, and event signatures remain available.
 
 ## An instance-owned client
 
