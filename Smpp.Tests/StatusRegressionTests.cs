@@ -16,7 +16,9 @@ namespace Smpp.Tests
             string encoded = null;
             var events = new GateEvents();
             events.ChannelEvent += (_, description, pdu) => { if (description == "Sending [deliver_sm] report") encoded = pdu; };
-            var connection = new ProbeConnection(events) { debug = true };
+            using var pair = new SocketPair();
+            var connection = new ProbeConnection(events, server: true) { debug = true };
+            connection.Attach(pair.Local);
             string id = new string('a', 65);
             connection.SubmitDeliveryReport(id, Common.MessageStatus.rejected);
             var report = new DeliverSm(encoded);
@@ -38,7 +40,7 @@ namespace Smpp.Tests
             var connection = new ProbeConnection(events);
             foreach (uint error in new uint[] { 0, 13, 0x123, 0xFFFFFFFF })
             {
-                connection.Track(42, 1, DateTime.UtcNow);
+                connection.Track(42, 1, DateTime.UtcNow, command);
                 string response = $"00000010{command:X8}{error:X8}0000002A";
                 connection.MessageHandler(response);
                 connection.MessageHandler(response);
@@ -144,7 +146,9 @@ namespace Smpp.Tests
             string encoded = null;
             var events = new GateEvents();
             events.ChannelEvent += (_, description, pdu) => { if (description == "Sending [deliver_sm] report") encoded = pdu; };
-            var connection = new ProbeConnection(events) { debug = true };
+            using var pair = new SocketPair();
+            var connection = new ProbeConnection(events, server: true) { debug = true };
+            connection.Attach(pair.Local);
             connection.SubmitDeliveryReport("42", status);
             var report = new DeliverSm(encoded);
             report.Decode();

@@ -206,9 +206,11 @@ namespace Smpp.Tests
                 Server.StartAsync("127.0.0.1", 0, new SslServerAuthenticationOptions { ServerCertificate = certificates.Server });
                 using var peer = new TcpClient();
                 await peer.ConnectAsync(IPAddress.Loopback, ListenerPort());
+                var stream = peer.GetStream();
+                WaitUntil(() => Server.PendingHandshakeCount == 1, "The listener should own the pending TLS handshake");
                 Server.Stop();
                 var buffer = new byte[1];
-                Assert.That(await peer.GetStream().ReadAsync(buffer).AsTask().WaitAsync(TimeSpan.FromSeconds(3)), Is.Zero);
+                Assert.That(await stream.ReadAsync(buffer).AsTask().WaitAsync(TimeSpan.FromSeconds(3)), Is.Zero);
             }
             finally { Server.Stop(); }
         }

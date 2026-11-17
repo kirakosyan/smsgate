@@ -34,14 +34,32 @@ namespace Smpp
         /// <param name="tail">the tail of the PDU</param>
         public void LoadTLV(string tail)
         {
-            string key;
-            object value;
-
-            while (tail != String.Empty)
+            if (tail.Length == 0) return;
+            int offset = 0;
+            Common.ReadTlv(tail, ref offset, out string key, out object value);
+            if (offset == tail.Length)
             {
-                Common.GetTLV(out key, out value, ref tail);
                 tlv.Add(key, value);
+                return;
             }
+
+            // Preserve the public collection and its comparer. Sorting once avoids shifting the
+            // SortedList backing arrays for each out-of-order parameter in a received PDU.
+            var parameters = new List<KeyValuePair<string, object>>(tlv);
+            parameters.Add(new(key, value));
+            while (offset < tail.Length)
+            {
+                Common.ReadTlv(tail, ref offset, out key, out value);
+                parameters.Add(new(key, value));
+            }
+            parameters.Sort((left, right) => tlv.Comparer.Compare(left.Key, right.Key));
+            for (int i = 1; i < parameters.Count; i++)
+                if (tlv.Comparer.Compare(parameters[i - 1].Key, parameters[i].Key) == 0)
+                    throw new ArgumentException("Duplicate SMPP optional parameter " + parameters[i].Key + ".");
+            tlv.Clear();
+            if (tlv.Capacity < parameters.Count) tlv.Capacity = parameters.Count;
+            foreach (var parameter in parameters)
+                tlv.Add(parameter.Key, parameter.Value);
         }
 
         /// <summary>
@@ -127,13 +145,51 @@ namespace Smpp
 
         #region utility methods
 
+        internal readonly record struct BodyEncoding(string Text, int Coding, int Mode, int Split, bool Packed, byte Reference, bool Gsm7);
+        private sealed record ReceivedBody(BodyEncoding Encoding, MessageBodyCodec.Part Part, object Payload);
+        private ReceivedBody receivedBody;
+
+        internal void RememberWireBody(BodyEncoding encoding, string shortMessageHex, int esmClass)
+        {
+            tlv.TryGetValue("0424", out var payload);
+            var field = (shortMessageHex.Length / 2).ToString("X2") + shortMessageHex;
+            receivedBody = new(encoding, new MessageBodyCodec.Part(field, (esmClass & 0x40) != 0), payload);
+        }
+
+        internal MessageBodyCodec.Part[] EncodeBody(BodyEncoding encoding, out bool originalBody)
+        {
+            // A received part can contain a UDH, provider-specific alphabet or packed padding.
+            // Forward its original octets unless the application changed the body or its encoding.
+            originalBody = receivedBody?.Encoding == encoding;
+            if (originalBody) return new[] { receivedBody.Part };
+            return MessageBodyCodec.Encode(encoding.Text, encoding.Coding, encoding.Mode,
+                encoding.Split, encoding.Packed, encoding.Reference, encoding.Gsm7);
+        }
+
+        internal int EncodeEsmClass(int esmClass, MessageBodyCodec.Part part, bool originalBody)
+        {
+            if (originalBody) return esmClass;
+            if (receivedBody?.Part.HasUserDataHeader == true)
+                esmClass &= ~0x40;
+            return esmClass | (part.HasUserDataHeader ? 0x40 : 0);
+        }
+
         protected string EncodeOptionalParameters(bool hasPayload, bool hasShortMessage)
+            => EncodeMessageParameters(hasPayload, hasShortMessage, originalBody: false);
+
+        internal string EncodeMessageParameters(bool hasPayload, bool hasShortMessage, bool originalBody)
         {
             var result = new StringBuilder();
             foreach (var parameter in tlv)
             {
-                if ((hasPayload || hasShortMessage) && parameter.Key.Equals("0424", StringComparison.OrdinalIgnoreCase))
-                    throw new ArgumentException("message_payload cannot duplicate Body or be combined with short_message.");
+                if (parameter.Key.Equals("0424", StringComparison.OrdinalIgnoreCase))
+                {
+                    // On a body edit, the encoder supplies the replacement payload. Keep the raw
+                    // parsed TLV available to callers, and still reject a second, manually set one.
+                    if (!originalBody && receivedBody != null && Equals(receivedBody.Payload, parameter.Value)) continue;
+                    if (hasPayload || hasShortMessage)
+                        throw new ArgumentException("message_payload cannot duplicate Body or be combined with short_message.");
+                }
                 if (parameter.Key.Length != 4)
                     throw new ArgumentException("TLV tags must contain four hexadecimal digits.");
                 ushort tag = ushort.Parse(parameter.Key, System.Globalization.NumberStyles.HexNumber);

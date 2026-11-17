@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -20,6 +21,8 @@ namespace Smpp
         private static readonly object ListenerLock = new object();
         private static TcpListener tcp_server;
         private static CancellationTokenSource listenerCancellation;
+        private static readonly HashSet<TcpClient> pendingHandshakes = new();
+        internal static int PendingHandshakeCount { get { lock (ListenerLock) return pendingHandshakes.Count; } }
         public static volatile bool running;
 
         public Server(string channelName, GateEvents events) : base(channelName, events)
@@ -68,7 +71,12 @@ namespace Smpp
 
         /// <summary>Starts an SMPP listener with optional TLS, authenticating TLS before reading bind credentials.</summary>
         public static void StartAsync(string ip, int port, SslServerAuthenticationOptions tlsOptions)
+            => StartAsync(ip, port, tlsOptions, maxPendingHandshakes: 64);
+
+        /// <summary>Starts a listener with a bound on simultaneous unauthenticated TLS and SMPP handshakes.</summary>
+        public static void StartAsync(string ip, int port, SslServerAuthenticationOptions tlsOptions, int maxPendingHandshakes)
         {
+            Guard.ThrowIfNegativeOrZero(maxPendingHandshakes);
             if (!IPAddress.TryParse(ip, out var address))
                 throw new ArgumentException("Check IP address", nameof(ip));
 #if NETFRAMEWORK
@@ -89,21 +97,41 @@ namespace Smpp
                 tcp_server = listener;
                 running = true;
                 listenerCancellation = new CancellationTokenSource();
-                _ = AcceptConnections(listener, listenerCancellation.Token, tlsOptions);
+                _ = AcceptConnections(listener, listenerCancellation.Token, tlsOptions, maxPendingHandshakes);
             }
         }
 
-        private static Task AcceptConnections(TcpListener listener, CancellationToken cancellation, SslServerAuthenticationOptions tlsOptions) =>
-            RunAcceptLoop(listener.AcceptTcpClientAsync,
-                client => { _ = CreateConnection(listener, client, cancellation, tlsOptions: tlsOptions); },
+        private static Task AcceptConnections(TcpListener listener, CancellationToken cancellation, SslServerAuthenticationOptions tlsOptions, int maxPendingHandshakes)
+        {
+            return RunAcceptLoop(listener.AcceptTcpClientAsync,
+                client =>
+                {
+                    lock (ListenerLock)
+                    {
+                        if (!ReferenceEquals(listener, tcp_server) || pendingHandshakes.Count >= maxPendingHandshakes)
+                        {
+                            client.Dispose();
+                            return;
+                        }
+                        pendingHandshakes.Add(client);
+                    }
+                    _ = CompleteHandshake(client);
+                },
                 ex =>
                 {
                     Server[] servers;
                     lock (Gate.Servers)
                         servers = Gate.Servers.Values.ToArray();
                     foreach (var server in servers)
-                        server.Notify(() => server.Events.LogChannelEvent(server.channel_name, "Accept failed; retrying: " + ex.Message));
+                        server.NotifyDiagnostic(() => server.Events.LogChannelEvent(server.channel_name, "Accept failed; retrying: " + ex.Message));
                 }, cancellation);
+
+            async Task CompleteHandshake(TcpClient client)
+            {
+                try { await CreateConnection(listener, client, cancellation, tlsOptions: tlsOptions).ConfigureAwait(false); }
+                finally { lock (ListenerLock) pendingHandshakes.Remove(client); }
+            }
+        }
 
         internal static async Task RunAcceptLoop(Func<CancellationToken, ValueTask<TcpClient>> accept,
             Action<TcpClient> accepted, Action<SocketException> failed, CancellationToken cancellation)
@@ -154,7 +182,7 @@ namespace Smpp
                     var secure = new SslStream(stream, false, tlsOptions.CertificateValidationCallback);
                     stream = secure;
                     await FrameworkAsync.WithCancellation(() => secure.AuthenticateAsServerAsync(tlsOptions.ServerCertificate,
-                        tlsOptions.ClientCertificateRequired, tlsOptions.EnabledSslProtocols, tlsOptions.CheckCertificateRevocation), secure.Dispose, deadline.Token).ConfigureAwait(false);
+                        tlsOptions.ClientCertificateRequired, tlsOptions.EnabledSslProtocols, tlsOptions.CheckCertificateRevocation), client.Close, deadline.Token).ConfigureAwait(false);
 #else
                     var secure = new SslStream(stream, false);
                     stream = secure;
@@ -216,7 +244,7 @@ namespace Smpp
                     return;
                 }
                 deadline.Token.ThrowIfCancellationRequested();
-                accepted = server.AcceptSession(client, stream, response, command);
+                accepted = server.AcceptSession(listener, client, stream, response, command);
             }
             catch (Exception ex) when (ex is System.IO.IOException || ex is SocketException ||
                 ex is ArgumentException || ex is FormatException || ex is IndexOutOfRangeException ||
@@ -236,7 +264,7 @@ namespace Smpp
             }
         }
 
-        private bool AcceptSession(TcpClient client, System.IO.Stream stream, Pdu response, Common.CommandId command)
+        private bool AcceptSession(TcpListener listener, TcpClient client, System.IO.Stream stream, Pdu response, Common.CommandId command)
         {
             lock (SessionLock)
             {
@@ -246,11 +274,25 @@ namespace Smpp
                     stream.Write(Common.ConvertHexStringToByteArray(response.Encode()));
                     return false;
                 }
+                if ((!direction_in && command != Common.CommandId.bind_receiver) ||
+                    (!direction_out && command != Common.CommandId.bind_transmitter))
+                {
+                    response.command_status = 13; // ESME_RBINDFAIL: this account does not allow the requested mode.
+                    stream.Write(Common.ConvertHexStringToByteArray(response.Encode()));
+                    return false;
+                }
+                // Transfer the authenticated socket while holding the session lock. Stop either
+                // closes a pending socket or waits for this session via Quit. Release the slot
+                // before the bind response becomes observable to the peer.
+                lock (ListenerLock)
+                {
+                    if (!ReferenceEquals(listener, tcp_server) || !pendingHandshakes.Remove(client)) return false;
+                }
                 stream.Write(Common.ConvertHexStringToByteArray(response.Encode()));
-                BeginSession(client, true, stream);
+                BeginSession(client, stream, command);
                 string remote = client.Client.RemoteEndPoint.ToString();
-                Notify(() => Events.LogChannelEvent(channel_name, "Received [" + command + "]"));
-                Notify(() => Events.LogChannelEvent(channel_name, "Logged in successfully IP: " + remote));
+                NotifyDiagnostic(() => Events.LogChannelEvent(channel_name, "Received [" + command + "]"));
+                NotifyDiagnostic(() => Events.LogChannelEvent(channel_name, "Logged in successfully IP: " + remote));
                 Receive();
                 return true;
             }
@@ -258,16 +300,25 @@ namespace Smpp
 
         public static bool Stop()
         {
+            TcpClient[] pending;
+            CancellationTokenSource cancellation;
+            Server[] servers;
             lock (ListenerLock)
             {
                 running = false;
-                listenerCancellation?.Cancel();
-                listenerCancellation?.Dispose();
+                pending = pendingHandshakes.ToArray();
+                pendingHandshakes.Clear();
+                cancellation = listenerCancellation;
                 listenerCancellation = null;
                 tcp_server?.Stop();
                 tcp_server = null;
+                lock (Gate.Servers) servers = Gate.Servers.Values.ToArray();
             }
-            KillAll();
+            // Socket and cancellation callbacks can run continuations that take ListenerLock.
+            foreach (var client in pending) client.Close();
+            cancellation?.Cancel();
+            cancellation?.Dispose();
+            foreach (var server in servers) server.Quit();
             return true;
         }
 

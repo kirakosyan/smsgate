@@ -26,7 +26,7 @@ namespace Smpp.Tests
                 (udhi ? "40" : "00") + "00" + Common.body_format[format].ToString("X2") +
                 $"0424{payload.Length / 2:X4}{payload}");
 
-        private static string[] IncomingParts(string command, string body, string recipient = "2")
+        internal static string[] IncomingParts(string command, string body, string recipient = "2")
         {
             if (command != "data") return Encode(command, body, recipient: recipient);
             return new[]
@@ -38,7 +38,7 @@ namespace Smpp.Tests
 
         [Test]
         public void AcknowledgedSegmentsSurviveEveryTransientClientDisconnect(
-            [Values("submit", "deliver", "data")] string command,
+            [Values("deliver", "data")] string command,
             [Values("eof", "reset", "unbind", "timeout", "bad-frame")] string failure)
         {
             var messages = new ConcurrentQueue<string>();
@@ -88,7 +88,7 @@ namespace Smpp.Tests
             var messages = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => messages.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: command == "submit");
             string body = new string('w', 180);
             var parts = IncomingParts(command, body);
             try
@@ -104,6 +104,8 @@ namespace Smpp.Tests
                 connection.MessageHandler(parts[0]);
                 connection.Drop();
                 connection.AgeMultipart();
+                using var third = new SocketPair();
+                connection.Attach(third.Local);
                 connection.MessageHandler(parts[1]);
                 Assert.That(messages, Has.Count.EqualTo(1), "Expired parts must not be joined after a reconnect");
                 Assert.That(connection.MultipartCount, Is.EqualTo(1));
@@ -114,7 +116,6 @@ namespace Smpp.Tests
         }
 
         [TestCase("submit")]
-        [TestCase("deliver")]
         [TestCase("data")]
         public void ServerRebindAlsoRetainsAcknowledgedSegments(string command)
         {
@@ -206,7 +207,7 @@ namespace Smpp.Tests
             var connection = new ProbeConnection(events);
             try
             {
-                connection.TrackParts(10, 3, 42, DateTime.UtcNow);
+                connection.TrackParts(10, 3, 42, DateTime.UtcNow, command);
                 foreach (int part in order)
                 {
                     var response = Frame(command, Common.StringToHex("part" + part) + "00", (uint)(10 + part), part == rejectedPart ? 0x58u : 0);

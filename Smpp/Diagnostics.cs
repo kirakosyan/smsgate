@@ -44,22 +44,52 @@ namespace Smpp
         {
             var handler = Diagnostic;
             if (handler == null) return;
-            Notify(() => handler(new ProtocolDiagnostic(channel_name, name, sequence, status, elapsed)));
+            NotifyDiagnostic(() => handler(new ProtocolDiagnostic(channel_name, name, sequence, status, elapsed)));
         }
 
         // Meter listeners execute synchronously. Dispatch measurements like other application callbacks.
         private void Measure(Counter<long> instrument, long value, KeyValuePair<string, object>? tag = null)
         {
             if (!instrument.Enabled) return;
-            Notify(() => { if (tag.HasValue) instrument.Add(value, tag.Value); else instrument.Add(value); });
+            NotifyDiagnostic(() => { if (tag.HasValue) instrument.Add(value, tag.Value); else instrument.Add(value); });
         }
+        private sealed class PendingDelta
+        {
+            internal long Value;
+            internal bool Scheduled;
+        }
+        private readonly PendingDelta queueDelta = new();
+        private readonly PendingDelta inFlightDelta = new();
+
+        // Queue depth and in-flight counts are balanced increments/decrements. Losing one
+        // permanently skews the total. One coalesced callback per instrument bounds the backlog.
         private void Measure(UpDownCounter<long> instrument, long value)
         {
-            if (instrument.Enabled) Notify(() => instrument.Add(value));
+            if (!instrument.Enabled) return;
+            var delta = instrument == SmppDiagnostics.Queue ? queueDelta : inFlightDelta;
+            lock (notifications)
+            {
+                delta.Value += value;
+                if (delta.Scheduled) return;
+                delta.Scheduled = true;
+                EnqueueNotification(() => PublishDelta(instrument, delta), NotificationKind.Measurement);
+            }
+        }
+
+        private void PublishDelta(UpDownCounter<long> instrument, PendingDelta delta)
+        {
+            long value;
+            lock (notifications)
+            {
+                value = delta.Value;
+                delta.Value = 0;
+                delta.Scheduled = false;
+            }
+            instrument.Add(value);
         }
         private void Measure(Histogram<double> instrument, double value)
         {
-            if (instrument.Enabled) Notify(() => instrument.Record(value));
+            if (instrument.Enabled) NotifyDiagnostic(() => instrument.Record(value));
         }
         private static Task RunDetached(Func<Task> action)
         {

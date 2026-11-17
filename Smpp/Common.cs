@@ -451,6 +451,7 @@ namespace Smpp
         /// </summary>
         public struct MultipartMessage
         {
+            internal byte ReferenceKind;
             public DateTime submitted_dt;
             public int reference;
             public string sender;
@@ -756,12 +757,26 @@ namespace Smpp
 
         public static void GetTLV(out string key, out object value, ref string tail)
         {
-            int tlv_length = 0;
-            key = tail.Substring(0, 4);
-            tail = tail.Remove(0, 4);
-            tlv_length = Convert.ToInt32(tail.Substring(0, 4), 16);
-            value = tail.Substring(4, tlv_length * 2);
-            tail = tail.Remove(0, tlv_length * 2 + 4);
+            int offset = 0;
+            ReadTlv(tail, ref offset, out key, out value);
+            tail = tail.Substring(offset);
+        }
+
+        internal static void ReadTlv(string source, ref int offset, out string key, out object value)
+        {
+            if (source.Length - offset < 8)
+                throw new FormatException("Incomplete SMPP optional parameter header.");
+            key = source.Substring(offset, 4);
+            const System.Globalization.NumberStyles hex = System.Globalization.NumberStyles.AllowHexSpecifier;
+            if (!ushort.TryParse(key, hex, null, out _) ||
+                !ushort.TryParse(source.Substring(offset + 4, 4), hex, null, out ushort length))
+                throw new FormatException("Invalid SMPP optional parameter tag or length.");
+            offset += 8;
+            int characters = length * 2;
+            if (source.Length - offset < characters)
+                throw new FormatException("Incomplete SMPP optional parameter value.");
+            value = source.Substring(offset, characters);
+            offset += characters;
         }
 
         public static string GetCString(ref string tail)

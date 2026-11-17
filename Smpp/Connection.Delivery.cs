@@ -1,11 +1,49 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Smpp
 {
     public abstract partial class Connection
     {
+        private readonly Dictionary<uint, TaskCompletionSource<uint?>> reportResponses = new();
+
+        /// <summary>Writes a delivery report and awaits the peer's SMPP command status. A timeout, transport failure or cancellation after writing leaves acceptance unknown.</summary>
+        public async Task<uint> SubmitDeliveryReportAsync(string messageId, Common.MessageStatus status, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var response = new TaskCompletionSource<uint?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int result = WriteDeliveryReport(messageId, status, response, out uint sequence);
+            if (result == 1) throw new InvalidOperationException("A receiver or transceiver must be bound to this server to send a delivery report.");
+            if (result != 0) throw new System.IO.IOException("The delivery report could not be written to the SMPP transport.");
+            try
+            {
+                var peerStatus = await response.Task.WaitAsync(TimeSpan.FromMilliseconds(timeout), cancellationToken).ConfigureAwait(false);
+                return peerStatus ?? throw new System.IO.IOException("The session closed before the delivery report was acknowledged.");
+            }
+            finally
+            {
+                lock (SessionLock)
+                    if (reportResponses.TryGetValue(sequence, out var current) && ReferenceEquals(current, response))
+                        reportResponses.Remove(sequence);
+            }
+        }
+
+        private bool CompleteReportResponse(uint sequence, uint status)
+        {
+            if (!reportResponses.Remove(sequence, out var response)) return false;
+            response.TrySetResult(status);
+            return true;
+        }
+
+        private void FailReportResponses()
+        {
+            foreach (var response in reportResponses.Values) response.TrySetResult(null);
+            reportResponses.Clear();
+        }
+
         internal sealed class DeliveryPart
         {
             internal Submission Submission;
@@ -127,6 +165,7 @@ namespace Smpp
                         deliveryParts.Remove(providerId, out _);
                         ambiguousReceiptIds.Set(providerId, true);
                         ambiguousReceiptIds.Trim(MaxTrackedDeliveryParts, DateTime.MinValue);
+                        deliveryTrackingStore.ScheduleExpiry();
                         foreach (var previous in group.Parts)
                         {
                             previous.Status = Common.MessageStatus.generic_error;
@@ -136,7 +175,7 @@ namespace Smpp
                         part.Final = true;
                         group.Parts[0].Submission.Owner.PublishDeliveryStatus(group.Parts[0].Submission);
                         PublishDeliveryStatus(submission);
-                        Notify(() => Events.LogEvent(Smpp.Events.LogEvent.Level.Error, channel_name + " - Ambiguous provider message ID: " + providerId));
+                        NotifyDiagnostic(() => Events.LogEvent(Smpp.Events.LogEvent.Level.Error, channel_name + " - Ambiguous provider message ID: " + providerId));
                         return;
                     }
                 }
@@ -148,6 +187,7 @@ namespace Smpp
                 }
                 group.Parts.Add(part);
                 if (earlyReceipts.Remove(providerId, out var early)) group.LastReceipt = early.Select(submission.Owner.AcceptedReceiptsAreFinal);
+                deliveryTrackingStore.ScheduleExpiry();
                 if (group.LastReceipt != null) part.Submission.Owner.UpdateTrackedReceipt(part, group.LastReceipt);
             }
         }
@@ -180,10 +220,14 @@ namespace Smpp
                         earlyReceipts.Trim(MaxTrackedDeliveryParts, DateTime.MinValue);
                     }
                     early.Observe(receipt);
+                    deliveryTrackingStore.ScheduleExpiry();
                 }
                 var notification = receipt;
-                Notify(() => Events.OnDeliveryReceipt(notification));
-                Notify(() => Events.LogMessageDeliverReportEvent(notification.ProviderMessageId, notification.Status));
+                NotifyIncoming(() =>
+                {
+                    try { Events.OnDeliveryReceipt(notification); }
+                    finally { Events.LogMessageDeliverReportEvent(notification.ProviderMessageId, notification.Status); }
+                });
             }
         }
 
@@ -228,23 +272,18 @@ namespace Smpp
             }
         }
 
-        private void ExpireDeliveryTracking(DateTime now)
-        {
-            lock (deliveryTrackingStore.SyncRoot)
-            {
-                var cutoff = now - DeliveryTrackingLifetime;
-                deliveryParts.Trim(MaxTrackedDeliveryParts, cutoff, ExpireDeliveryGroup);
-                earlyReceipts.Trim(MaxTrackedDeliveryParts, cutoff);
-                ambiguousReceiptIds.Trim(MaxTrackedDeliveryParts, cutoff);
-            }
-        }
+        private void ExpireDeliveryTracking(DateTime now) => deliveryTrackingStore.Expire(now);
 
         private void ClearDeliveryTracking()
         {
             lock (deliveryTrackingStore.SyncRoot)
             {
                 if (ownsDeliveryTrackingStore && !deliveryTrackingStore.ExternallyAssigned) deliveryTrackingStore.Clear();
-                else deliveryParts.RemoveWhere(group => ReferenceEquals(group.Parts[0].Submission.Owner, this), ExpireDeliveryGroup);
+                else
+                {
+                    deliveryParts.RemoveWhere(group => ReferenceEquals(group.Parts[0].Submission.Owner, this), ExpireDeliveryGroup);
+                    deliveryTrackingStore.ScheduleExpiry();
+                }
             }
         }
     }

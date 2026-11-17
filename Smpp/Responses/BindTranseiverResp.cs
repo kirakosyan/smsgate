@@ -35,7 +35,8 @@ namespace Smpp.Responses
             int len = 0;
 
             response.Append(BuildHeader(Common.CommandId.bind_transceiver_resp, command_status, sequence_number));
-            response.Append("00");
+            if (command_status == 0)
+                response.Append("00");
 
             // Some systems does not like this, ignore
             //response.Append(SystemID);

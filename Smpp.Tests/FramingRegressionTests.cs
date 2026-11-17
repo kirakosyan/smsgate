@@ -16,7 +16,7 @@ namespace Smpp.Tests
             var messages = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => messages.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: command == "submit");
             string body = new string('a', 65535);
             string frame = Encode(command, body, mode: 2)[0];
             for (int i = 0; i < frame.Length; i += 4096)
@@ -35,7 +35,7 @@ namespace Smpp.Tests
                 if (body == "bad") throw new System.InvalidOperationException("Application failure");
                 messages.Add(body);
             };
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: true);
             connection.MessageHandler(Encode("submit", "bad")[0] + Encode("submit", "good")[0]);
             Assert.That(messages, Is.EqualTo(new[] { "good" }));
             connection.Quit();
@@ -53,7 +53,7 @@ namespace Smpp.Tests
                 var messages = new List<string>();
                 var events = new GateEvents();
                 events.NewMessageEvent += (_, _, _, _, body, _, _) => messages.Add(body);
-                var connection = new ProbeConnection(events);
+                var connection = new ProbeConnection(events, server: command == "submit");
                 connection.MessageHandler(first + second.Substring(0, split));
                 Assert.That(messages, Is.EqualTo(new[] { "first" }), "Split at hex character " + split);
                 connection.MessageHandler(second.Substring(split));
@@ -70,7 +70,7 @@ namespace Smpp.Tests
             var messages = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => messages.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: command == "submit");
             var first = Encode(command, "one")[0];
             for (int i = 0; i < first.Length; i += 2)
                 connection.MessageHandler(first.Substring(i, 2));
@@ -88,7 +88,7 @@ namespace Smpp.Tests
             var messages = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => messages.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: true);
             connection.MessageHandler(Encode("submit", "first")[0] + badHeader);
             connection.MessageHandler(Encode("submit", "next")[0]);
             Assert.That(messages, Is.EqualTo(new[] { "first" }), "Traffic after the lost boundary must be discarded");
@@ -102,7 +102,7 @@ namespace Smpp.Tests
             var messages = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => messages.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: true);
             connection.MessageHandler("00000010000000040000000000000001" + Encode("submit", "valid")[0]);
             Assert.That(messages, Is.EqualTo(new[] { "valid" }));
             connection.Quit();

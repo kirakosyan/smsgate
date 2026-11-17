@@ -16,7 +16,7 @@ Use PackageReference so NuGet restores the compatibility dependencies. A minimal
     <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="SMSGate" Version="1.2.0" />
+    <PackageReference Include="SMSGate" Version="1.3.0" />
   </ItemGroup>
 </Project>
 ```

@@ -23,7 +23,7 @@ namespace Smpp.Tests
             int received = 0;
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, _, _, _) => Interlocked.Increment(ref received);
-            var connection = new ProbeConnection(events) { FailAcknowledgement = true };
+            var connection = new ProbeConnection(events, server: true) { FailAcknowledgement = true };
             var handled = Completion<bool>();
             if (controlled) connection.InboundMessageHandler = (_, _) =>
             {
@@ -49,7 +49,7 @@ namespace Smpp.Tests
             using var releaseLock = new ManualResetEventSlim();
             var started = Completion<bool>();
             var finish = Completion<MessageAcknowledgement>();
-            var connection = new ProbeConnection
+            var connection = new ProbeConnection(server: true)
             {
                 AcknowledgementTimeout = 1000,
                 InboundMessageHandler = (_, _) => { started.TrySetResult(true); return finish.Task; }
@@ -81,7 +81,7 @@ namespace Smpp.Tests
             var received = Completion<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, id, _, _, _, _, _) => received.TrySetResult(id);
-            var connection = new ProbeConnection(events)
+            var connection = new ProbeConnection(events, server: command == "submit")
             {
                 InboundMessageHandler = async (message, token) =>
                 {
@@ -119,7 +119,7 @@ namespace Smpp.Tests
             int received = 0;
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, _, _, _) => Interlocked.Increment(ref received);
-            var connection = new ProbeConnection(events)
+            var connection = new ProbeConnection(events, server: command == "submit")
             {
                 InboundMessageHandler = (_, _) => Task.FromResult(MessageAcknowledgement.Reject(0x58))
             };
@@ -140,7 +140,7 @@ namespace Smpp.Tests
         public void HandlerFailureOrInvalidResponseIdReturnsSystemError(bool invalidId)
         {
             using var pair = new SocketPair();
-            var connection = new ProbeConnection
+            var connection = new ProbeConnection(server: true)
             {
                 InboundMessageHandler = (_, _) => invalidId
                     ? Task.FromResult(MessageAcknowledgement.Accept("invalid\0id"))
@@ -162,7 +162,7 @@ namespace Smpp.Tests
             var started = Completion<bool>();
             var finish = Completion<MessageAcknowledgement>();
             var cancelled = Completion<bool>();
-            var connection = new ProbeConnection
+            var connection = new ProbeConnection(server: true)
             {
                 AcknowledgementTimeout = 100, MaxPendingAcknowledgements = 1,
                 InboundMessageHandler = async (_, token) =>
@@ -197,7 +197,7 @@ namespace Smpp.Tests
             var started = Completion<bool>();
             var finish = Completion<MessageAcknowledgement>();
             int calls = 0;
-            var connection = new ProbeConnection
+            var connection = new ProbeConnection(server: true)
             {
                 MaxPendingAcknowledgements = 1,
                 InboundMessageHandler = (_, _) =>
@@ -229,7 +229,7 @@ namespace Smpp.Tests
             var started = Completion<bool>();
             var cancelled = Completion<bool>();
             var finish = Completion<MessageAcknowledgement>();
-            var connection = new ProbeConnection
+            var connection = new ProbeConnection(server: true)
             {
                 InboundMessageHandler = async (_, token) =>
                 {
@@ -263,7 +263,7 @@ namespace Smpp.Tests
             var assembled = new ConcurrentQueue<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => assembled.Enqueue(body);
-            var connection = new ProbeConnection(events)
+            var connection = new ProbeConnection(events, server: true)
             {
                 InboundMessageHandler = (message, _) =>
                 {

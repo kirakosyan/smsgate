@@ -41,20 +41,46 @@ namespace Smpp
 
         private void DispatchInbound(Pdu request, string sender, string recipient, string body, string format,
             int registeredDelivery, Common.MultipartMessage? multipart, DeliveryReceipt receipt,
-            Func<MessageAcknowledgement, string> encodeResponse, Action<string> accepted)
+            Func<MessageAcknowledgement, string> encodeResponse, Action<string, string> accepted)
         {
-            string generatedId = Guid.NewGuid().ToString("n");
-            var handler = InboundMessageHandler;
-            if (handler == null)
+            if (!HasInboundNotificationCapacity())
             {
-                if (SendAcknowledgement(request, encodeResponse, MessageAcknowledgement.Accept(generatedId)) == 0)
-                    accepted(generatedId);
+                SendAcknowledgement(request, encodeResponse, MessageAcknowledgement.Reject(0x58));
                 return;
             }
-            if (pendingAcknowledgements >= MaxPendingAcknowledgements ||
-                Volatile.Read(ref activeAcceptanceHandlers) >= MaxPendingAcknowledgements)
+            var handler = InboundMessageHandler;
+            if (handler != null && (pendingAcknowledgements >= MaxPendingAcknowledgements ||
+                Volatile.Read(ref activeAcceptanceHandlers) >= MaxPendingAcknowledgements))
             {
                 SendAcknowledgement(request, encodeResponse, MessageAcknowledgement.Reject(0x58)); // ESME_RTHROTTLED
+                return;
+            }
+            MultipartSlot slot = null;
+            if (multipart.HasValue && ReserveSegment(multipart.Value, out slot) is { } immediate)
+            {
+                SendAcknowledgement(request, encodeResponse, immediate);
+                return;
+            }
+            int generation = sessionGeneration;
+            void Complete(MessageAcknowledgement response)
+            {
+                bool confirmed = false;
+                string acceptedBody = body;
+                try
+                {
+                    confirmed = SendAcknowledgement(request, encodeResponse, response) == 0 &&
+                        sessionGeneration == generation && response.CommandStatus == 0;
+                }
+                finally
+                {
+                    if (slot != null) acceptedBody = FinishSegment(slot, confirmed ? response.MessageId : null);
+                }
+                if (confirmed && acceptedBody != null) accepted(response.MessageId, acceptedBody);
+            }
+            string generatedId = Guid.NewGuid().ToString("n");
+            if (handler == null)
+            {
+                Complete(MessageAcknowledgement.Accept(generatedId));
                 return;
             }
             var parameters = new ReadOnlyDictionary<string, string>(request.tlv.ToDictionary(pair => pair.Key, pair => pair.Value.ToString(), StringComparer.OrdinalIgnoreCase));
@@ -63,10 +89,9 @@ namespace Smpp
                 multipart?.reference, multipart?.part_num, multipart?.num_of_parts, parameters, receipt);
             pendingAcknowledgements++;
             Interlocked.Increment(ref activeAcceptanceHandlers);
-            int generation = sessionGeneration;
             var token = sessionCancellation?.Token ?? CancellationToken.None;
             // Start the deadline at dispatch, even if the thread pool is busy. Only application work is queued.
-            _ = ProcessInboundAsync(generation, token, handler, request, message, encodeResponse, accepted);
+            _ = ProcessInboundAsync(generation, token, handler, message, Complete);
         }
 
         protected virtual int WriteAcknowledgement(string pdu) => SendPDU(pdu);
@@ -74,13 +99,13 @@ namespace Smpp
         private int SendAcknowledgement(Pdu request, Func<MessageAcknowledgement, string> encodeResponse, MessageAcknowledgement acknowledgement)
         {
             Common.command_id.TryGetValue(request.command_id | 0x80000000, out var name);
-            Notify(() => Events.LogChannelEvent(channel_name, "Sending [" + name + "]"));
+            NotifyDiagnostic(() => Events.LogChannelEvent(channel_name, "Sending [" + name + "]"));
             return WriteAcknowledgement(encodeResponse(acknowledgement));
         }
 
         private async Task ProcessInboundAsync(int generation, CancellationToken sessionToken,
-            Func<InboundMessage, CancellationToken, Task<MessageAcknowledgement>> handler, Pdu request, InboundMessage message,
-            Func<MessageAcknowledgement, string> encodeResponse, Action<string> accepted)
+            Func<InboundMessage, CancellationToken, Task<MessageAcknowledgement>> handler, InboundMessage message,
+            Action<MessageAcknowledgement> complete)
         {
             MessageAcknowledgement response;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
@@ -112,7 +137,7 @@ namespace Smpp
             {
                 response = MessageAcknowledgement.Reject(8); // ESME_RSYSERR
                 if (!sessionToken.IsCancellationRequested)
-                    Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Inbound acceptance failed: " + ex.Message));
+                    NotifyDiagnostic(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Inbound acceptance failed: " + ex.Message));
             }
             lock (SessionLock)
             {
@@ -121,9 +146,7 @@ namespace Smpp
                 pendingAcknowledgements--;
                 if (stopped || sessionToken.IsCancellationRequested)
                     return;
-                int result = SendAcknowledgement(request, encodeResponse, response);
-                if (result == 0 && sessionGeneration == generation && response.CommandStatus == 0)
-                    accepted(response.MessageId);
+                complete(response);
             }
         }
     }

@@ -157,9 +157,9 @@ namespace Smpp.Tests
             var deliveries = new ConcurrentQueue<MessageDeliveryStatus>();
             var events = new GateEvents();
             events.MessageDeliveryStatusEvent += deliveries.Enqueue;
-            using var tx = new ProbeConnection(events) { AcceptedReceiptsAreFinal = acceptedIsFinal };
-            using var rx = new ProbeConnection { AcceptedReceiptsAreFinal = !acceptedIsFinal };
-            if (shared) tx.DeliveryTrackingStore = rx.DeliveryTrackingStore = new DeliveryTrackingStore();
+            var store = shared ? new DeliveryTrackingStore() : null;
+            using var tx = new ProbeConnection(events, store: store) { AcceptedReceiptsAreFinal = acceptedIsFinal };
+            using var rx = new ProbeConnection(store: store) { AcceptedReceiptsAreFinal = !acceptedIsFinal };
             var receiver = shared ? rx : tx;
             using var pair = new SocketPair();
             tx.Attach(pair.Local);
@@ -228,8 +228,8 @@ namespace Smpp.Tests
             using var entered = new ManualResetEventSlim();
             using var release = new ManualResetEventSlim();
             var store = new DeliveryTrackingStore();
-            using var connection = new ProbeConnection { DeliveryTrackingStore = store };
-            using var receiver = new ProbeConnection { DeliveryTrackingStore = store };
+            using var connection = new ProbeConnection(store: store);
+            using var receiver = new ProbeConnection(store: store);
             using var pair = new SocketPair();
             connection.Attach(pair.Local);
             bool sessionLockHeld = true;
@@ -267,8 +267,7 @@ namespace Smpp.Tests
         [TestCase(true)]
         public void QuitClearsPrivateTrackingCachesAndRetainsSharedUnmatchedReceipts(bool shared)
         {
-            using var connection = new ProbeConnection();
-            if (shared) connection.DeliveryTrackingStore = new DeliveryTrackingStore();
+            using var connection = new ProbeConnection(store: shared ? new DeliveryTrackingStore() : null);
             var store = connection.DeliveryTrackingStore;
             connection.MessageHandler(DeliveryTrackingTests.Receipt("early", 2));
             using var pair = new SocketPair();
@@ -291,11 +290,11 @@ namespace Smpp.Tests
         public void ReplacingAConfiguredStoreFailsRatherThanDiscardingItsSettings()
         {
             var shared = new DeliveryTrackingStore();
-            using var connection = new ProbeConnection { DeliveryTrackingLifetime = TimeSpan.FromHours(48) };
+            using var connection = new Client("configured", new GateEvents(), false) { DeliveryTrackingLifetime = TimeSpan.FromHours(48) };
             Assert.Throws<InvalidOperationException>(() => connection.DeliveryTrackingStore = shared);
             Assert.That(connection.DeliveryTrackingLifetime, Is.EqualTo(TimeSpan.FromHours(48)));
             Assert.That(shared.Lifetime, Is.EqualTo(TimeSpan.FromHours(24)));
-            using var other = new ProbeConnection { DeliveryTrackingStore = shared, MaxTrackedDeliveryParts = 20 };
+            using var other = new Client("consumer", new GateEvents(), false) { DeliveryTrackingStore = shared, MaxTrackedDeliveryParts = 20 };
             Assert.That(shared.Capacity, Is.EqualTo(20));
         }
 

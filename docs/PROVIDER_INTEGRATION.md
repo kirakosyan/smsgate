@@ -1,6 +1,6 @@
 # Provider integration
 
-These APIs are available since SMSGate 1.1.0. Version 1.2.0 (currently unreleased) adds .NET Framework 4.7.2+ alongside .NET 10. Use the SDK in `global.json` when building this repository. The .NET 10 target remains dependency-free; see [Framework setup](FRAMEWORK_SUPPORT.md) for Framework dependencies and application configuration.
+These APIs are available since SMSGate 1.1.0. Version 1.2.0 added .NET Framework 4.7.2+ alongside .NET 10. Use the SDK in `global.json` when building this repository. The .NET 10 target remains dependency-free; see [Framework setup](FRAMEWORK_SUPPORT.md) for Framework dependencies and application configuration.
 
 Run the complete loopback example with:
 
@@ -97,7 +97,7 @@ server.InboundMessageHandler = async (message, cancellationToken) =>
 };
 ```
 
-The handler runs outside protocol locks for `submit_sm`, `deliver_sm`, and `data_sm`, including delivery receipts. It receives the sequence number, decoded body, multipart metadata, optional parameter values as hexadecimal, and parsed receipt fields when present. It runs once per PDU, so persist each multipart segment independently. Segments and concurrent messages can be processed concurrently; responses are correlated by sequence number.
+The handler runs outside protocol locks for `submit_sm`, `deliver_sm`, and `data_sm`, including delivery receipts. It receives the sequence number, decoded body, multipart metadata, optional parameter values as hexadecimal, and parsed receipt fields when present. Persist each new multipart segment independently. Segments and concurrent messages can be processed concurrently. Responses use the incoming sequence number.
 
 Returning `Accept()` uses the generated `message.MessageId`; passing an ID lets the application choose its own. IDs must contain at most 64 ASCII characters without NUL. Use a unique ID for each accepted `submit_sm` or `data_sm` PDU so segment receipts can be correlated. The `deliver_sm_resp` wire ID remains empty as required by SMPP; the chosen application ID is available in `NewMessageEvent`.
 
@@ -106,6 +106,10 @@ Returning `Accept()` uses the generated `message.MessageId`; passing an ID lets 
 Keepalives and protocol reads continue while a handler awaits storage. Disconnects cancel the handler token and suppress its response; a late handler cannot acknowledge a replacement session. Handlers must honor cancellation. A timed-out handler that continues running retains a concurrency slot until it exits, preventing repeated timeouts from creating unlimited active handlers.
 
 `NewMessageEvent` is emitted after acceptance, once all multipart segments are accepted and assembled. Rejected segments do not enter reassembly. That event and other ordinary events remain observational: exceptions from them do not retract an acknowledgement. With no `InboundMessageHandler`, the original automatic acknowledgement behavior remains.
+
+Inbound reassembly recognizes 8-bit and 16-bit concatenation references in GSM user data headers and complete SMPP SAR parameter sets. The gateway checks segment numbers, counts, and duplicate content before calling the handler. An identical retransmission during an incomplete assembly gets its earlier acknowledgement ID. A retransmission while the original segment is awaiting an application decision receives `ESME_RTHROTTLED`. Conflicting segments receive `ESME_RINVMSGLEN`.
+
+`MaxMultipartAssemblies` defaults to 1,024 per connection. `MaxMultipartBytes` defaults to 8 MiB and accounts for retained text, addresses, and per-segment bookkeeping. Both limits include segments awaiting an application decision. When a segment would exceed a limit, the gateway returns `ESME_RTHROTTLED`. Incomplete assemblies expire after five idle minutes. Accepted segments survive transient reconnects within that window.
 
 Storage can succeed while an acknowledgement is lost. Applications must choose their own duplicate detection and retry policy; this API does not provide exactly-once delivery or a built-in durable store.
 

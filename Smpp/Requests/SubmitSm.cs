@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Text;
 
 namespace Smpp.Requests
@@ -169,7 +169,7 @@ namespace Smpp.Requests
             }
             get
             {
-                return int.Parse(registered_delivery);
+                return Convert.ToInt32(registered_delivery, 16);
             }
         }
 
@@ -220,27 +220,8 @@ namespace Smpp.Requests
             }
         }
 
-        public Common.MultipartMessage MultipartMessage
-        {
-            get
-            {
-                var mes = new Common.MultipartMessage
-                {
-                    reference = int.Parse(multipart_header.Substring(6, 2), System.Globalization.NumberStyles.HexNumber),
-                    submitted_dt = DateTime.UtcNow,
-                    sender = Sender,
-                    recipient = Recipient,
-                    body_format = BodyFormat,
-                    command = Common.CommandId.submit_sm,
-                    num_of_parts =
-                        int.Parse(multipart_header.Substring(8, 2), System.Globalization.NumberStyles.HexNumber),
-                    part_num = int.Parse(multipart_header.Substring(10, 2), System.Globalization.NumberStyles.HexNumber),
-                    short_message = short_message
-                };
-
-                return mes;
-            }
-        }
+        public Common.MultipartMessage MultipartMessage => MessageBodyCodec.Multipart(multipart_header, tlv,
+            Common.CommandId.submit_sm, Sender, Recipient, BodyFormat, short_message);
 
         public SubmitSm(string pdu)
             : base(pdu)
@@ -255,10 +236,12 @@ namespace Smpp.Requests
             is_8bit = false;
         }
 
+        private BodyEncoding CurrentEncoding => new(short_message, data_coding,
+            large_message_handle_method, split_base_ascii, is_8bit, multipart_ref_number, UseGsm7);
+
         public virtual string[] EncodeM()
         {
-            var encoded = MessageBodyCodec.Encode(short_message, data_coding,
-                large_message_handle_method, split_base_ascii, is_8bit, multipart_ref_number, UseGsm7);
+            var encoded = EncodeBody(CurrentEncoding, out bool originalBody);
             var parts = new string[encoded.Length];
             for (int i = 0; i < encoded.Length; i++)
             {
@@ -268,11 +251,13 @@ namespace Smpp.Requests
                 response.Append(Common.StringToHex(service_type) + "00");
                 response.AppendFormat("{0:X2}{1:X2}{2}00", source_addr_ton, source_addr_npi, Common.StringToHex(source_addr));
                 response.AppendFormat("{0:X2}{1:X2}{2}00", dest_addr_ton, dest_addr_npi, Common.StringToHex(destination_address));
-                response.AppendFormat("{0:X2}00000000", (part.HasUserDataHeader ? 0x40 : 0));
+                response.AppendFormat("{0:X2}{1:X2}{2:X2}", EncodeEsmClass(esm_class, part, originalBody), protocol_id, priority_flag);
+                response.Append(Common.StringToHex(schedule_delivery_time ?? "") + "00");
+                response.Append(Common.StringToHex(validity_period ?? "") + "00");
                 response.Append(registered_delivery);
-                response.AppendFormat("00{0:X2}00", data_coding);
+                response.AppendFormat("{0:X2}{1:X2}{2:X2}", replace_if_present_flag, data_coding, sm_default_msg_id);
                 response.Append(part.Field);
-                response.Append(EncodeOptionalParameters(large_message_handle_method == 2, part.Field != "00"));
+                response.Append(EncodeMessageParameters(!originalBody && large_message_handle_method == 2, part.Field != "00", originalBody));
                 parts[i] = (response.Length / 2 + 4).ToString("X8") + response;
             }
             return parts;
@@ -308,20 +293,25 @@ namespace Smpp.Requests
 
             bt = Common.ConvertHexStringToByteArray(tail.Substring(0, 10));
             tail = tail.Remove(0, 10);
-            registered_delivery = bt[0].ToString();
+            registered_delivery = bt[0].ToString("X2");
             replace_if_present_flag = bt[1];
             data_coding = bt[2];
             sm_default_msg_id = bt[3];
 
             sm_length = bt[4];
 
-            string messageHex = tail.Substring(0, sm_length * 2);
+            string shortMessageHex = tail.Substring(0, sm_length * 2);
+            string messageHex = shortMessageHex;
             tail = tail.Substring(sm_length * 2);
             tlv.Clear();
             LoadTLV(tail);
             if (sm_length == 0 && tlv.TryGetValue("0424", out var payload))
+            {
                 messageHex = payload.ToString();
-            short_message = MessageBodyCodec.Decode(messageHex, data_coding, esm_class, is_8bit, out multipart_header, UseGsm7);
+                large_message_handle_method = 2;
+            }
+            short_message = MessageBodyCodec.Decode(messageHex, data_coding, esm_class, is_8bit, out multipart_header, UseGsm7, tlv);
+            RememberWireBody(CurrentEncoding, shortMessageHex, esm_class);
         }
 
     }

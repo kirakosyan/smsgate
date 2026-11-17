@@ -16,7 +16,7 @@ namespace Smpp.Tests
             var messages = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => messages.Add(body);
-            var connection = new ProbeConnection(events) { use8bit = true };
+            var connection = new ProbeConnection(events, server: command == "submit") { use8bit = true };
             string body = Body("ascii", 307);
             foreach (var part in Encode(command, body, packed: true))
                 connection.MessageHandler(part);
@@ -33,7 +33,7 @@ namespace Smpp.Tests
             var received = new List<(string Sender, string Recipient, string Body)>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, sender, recipient, body, _, _) => received.Add((sender, recipient, body));
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: command == "submit");
             string first = new string('a', 170), second = new string('b', 170);
             var a = Encode(command, first, sender: "1", recipient: "2");
             var b = Encode(command, second, sender: differentSender ? "3" : "1", recipient: differentSender ? "2" : "4");
@@ -55,7 +55,7 @@ namespace Smpp.Tests
             var received = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => received.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: command == "submit");
             var a = Encode(command, Body("ascii", 170));
             int length = otherFormat == "unicode" ? 80 : 170;
             var b = Encode(command, Body(otherFormat, length), otherFormat);
@@ -69,14 +69,14 @@ namespace Smpp.Tests
         }
 
         [Test]
-        public void SubmitAndDeliverAssembliesWithSameReferenceRemainSeparate()
+        public void SubmitAndDataAssembliesWithSameReferenceRemainSeparate()
         {
             var received = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => received.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: true);
             var a = Encode("submit", new string('a', 170));
-            var b = Encode("deliver", new string('b', 170));
+            var b = ReviewFeedbackRegressionTests.IncomingParts("data", new string('b', 170));
             connection.MessageHandler(a[0]);
             connection.MessageHandler(b[1]);
             Assert.That(received, Is.Empty);
@@ -93,7 +93,7 @@ namespace Smpp.Tests
             var received = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => received.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: command == "submit");
             string body = Body("ascii", 307);
             var parts = Encode(command, body);
             connection.MessageHandler(parts[2]);
@@ -120,7 +120,7 @@ namespace Smpp.Tests
             byte[] invalid = Convert.FromHexString(parts[0]);
             invalid[39] = (byte)count;
             invalid[40] = (byte)index;
-            var connection = new ProbeConnection();
+            var connection = new ProbeConnection(server: command == "submit");
             connection.MessageHandler(Convert.ToHexString(invalid));
             Assert.That(connection.MultipartCount, Is.Zero);
             connection.MessageHandler(parts[0]);
@@ -136,7 +136,7 @@ namespace Smpp.Tests
             var received = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => received.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: command == "submit");
             string body = new string('a', 170);
             var parts = Encode(command, body);
             connection.MessageHandler(parts[0]);
@@ -158,7 +158,7 @@ namespace Smpp.Tests
             var received = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => received.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: command == "submit");
             var old = Encode(command, new string('a', 170));
             var current = Encode(command, new string('b', 170));
             connection.MessageHandler(old[0]);

@@ -58,9 +58,9 @@ jobs:
       - name: Build both package targets
         run: dotnet build Smpp/Smpp.csproj --configuration Release --no-restore -warnaserror
       - name: Restore the API compatibility baseline
-        run: dotnet restore Smpp/Smpp.csproj -warnaserror -p:EnablePackageValidation=true -p:PackageValidationBaselineVersion=1.1.1
+        run: dotnet restore Smpp/Smpp.csproj -warnaserror -p:EnablePackageValidation=true -p:PackageValidationBaselineVersion=1.2.0
       - name: Pack
-        run: dotnet pack Smpp/Smpp.csproj --configuration Release --no-build --no-restore -warnaserror --output artifacts -p:EnablePackageValidation=true -p:PackageValidationBaselineVersion=1.1.1
+        run: dotnet pack Smpp/Smpp.csproj --configuration Release --no-build --no-restore -warnaserror --output artifacts -p:EnablePackageValidation=true -p:PackageValidationBaselineVersion=1.2.0
       - name: Restore example from the package
         run: dotnet restore examples/LocalExchange/LocalExchange.csproj --source "$PWD/artifacts" -warnaserror
       - name: Verify local SMPP exchange using the package
@@ -118,7 +118,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $packageRoot = (Get-Content Smpp.Tests/obj/project.assets.json -Raw | ConvertFrom-Json).packageFolders.PSObject.Properties.Name | Select-Object -First 1
           $runner = Join-Path $packageRoot 'nunit.consolerunner/3.22.0/tools'
-          ./scripts/create-framework-bundle.ps1 -Package "artifacts/SMSGate.$version.nupkg" -RunnerDirectory $runner -Destination artifacts/framework-bundle -ExpectedTests 1057
+          ./scripts/create-framework-bundle.ps1 -Package "artifacts/SMSGate.$version.nupkg" -RunnerDirectory $runner -Destination artifacts/framework-bundle -ExpectedTests 1099
           ./scripts/qualify-framework.ps1 -BundleDirectory artifacts/framework-bundle -ResultsDirectory TestResults/Framework-Package
       - name: Upload Framework runtime reports
         if: always()

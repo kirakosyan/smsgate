@@ -24,8 +24,8 @@ namespace Smpp.Tests
             var results = new ConcurrentQueue<MessageDeliveryStatus>();
             var txEvents = new GateEvents();
             txEvents.MessageDeliveryStatusEvent += results.Enqueue;
-            using var tx = new ProbeConnection(txEvents) { DeliveryTrackingStore = store };
-            using var rx = new ProbeConnection { DeliveryTrackingStore = store };
+            using var tx = new ProbeConnection(txEvents, store: store);
+            using var rx = new ProbeConnection(store: store);
             using var pair = new SocketPair();
             tx.Attach(pair.Local);
             var submission = tx.SubmitAsync(new(42, "1", "2", "hello"));
@@ -46,8 +46,8 @@ namespace Smpp.Tests
             var results = new ConcurrentQueue<MessageDeliveryStatus>();
             var events = new GateEvents();
             events.MessageDeliveryStatusEvent += results.Enqueue;
-            using var tx = new ProbeConnection(events) { DeliveryTrackingStore = store };
-            using var rx = new ProbeConnection { DeliveryTrackingStore = store };
+            using var tx = new ProbeConnection(events, store: store);
+            using var rx = new ProbeConnection(store: store);
             using var pair = new SocketPair();
             tx.Attach(pair.Local);
             var task = tx.SubmitAsync(new(42, "1", "2", "hello"));
@@ -57,7 +57,7 @@ namespace Smpp.Tests
             rx.Quit();
             tx.Drain();
             Assert.That(results, Is.Empty);
-            using var replacement = new ProbeConnection { DeliveryTrackingStore = store };
+            using var replacement = new ProbeConnection(store: store);
             replacement.MessageHandler(DeliveryTrackingTests.Receipt("owned", 2));
             tx.Drain();
             Assert.That(results.Single().IsComplete, Is.True);

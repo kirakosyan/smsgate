@@ -178,6 +178,118 @@ namespace Smpp.Tests
             Assert.That(Decode(command, Encode(command, decoded.Body, "wap_push", 2)[0]).Body, Is.EqualTo(decoded.Body));
         }
 
+        [TestCase("submit", 1)]
+        [TestCase("submit", 2)]
+        [TestCase("deliver", 1)]
+        [TestCase("deliver", 2)]
+        [TestCase("data", 2)]
+        public void PublicMessageObjectsCanForwardReceivedMessagesAndEditTheirBodies(string command, int mode)
+        {
+            string[] frames = Encode(command, new string('a', 200), mode: mode);
+            foreach (string frame in frames)
+            {
+                Pdu message;
+                Func<string[]> encode;
+                Action<string> setBody;
+                if (command == "submit")
+                {
+                    var submit = new SubmitSm(frame);
+                    message = submit;
+                    encode = submit.EncodeM;
+                    setBody = value => submit.Body = value;
+                }
+                else if (command == "deliver")
+                {
+                    var deliver = new DeliverSm(frame);
+                    deliver.Decode();
+                    message = deliver;
+                    encode = deliver.EncodeM;
+                    setBody = value => deliver.Body = value;
+                }
+                else
+                {
+                    var data = new DataSm(frame);
+                    message = data;
+                    encode = data.EncodeM;
+                    setBody = value => data.Body = value;
+                }
+                Assert.That(encode(), Is.EqualTo(new[] { frame }));
+                setBody("replacement");
+                message.sequence_number = 73;
+                string edited = encode().Single();
+                Assert.That(Decode(command, edited).Body, Is.EqualTo("replacement"));
+                Assert.That(edited.Substring(24, 8), Is.EqualTo("00000049"));
+            }
+        }
+
+        [Test]
+        public void SubmitPreservesMandatoryFieldsAndAnEditedRecipient()
+        {
+            string addresses = "000501310001013200";
+            string fields = "800103" + Common.StringToHex("260101120000000+") + "000011010800020061";
+            string body = addresses + fields;
+            string frame = (16 + body.Length / 2).ToString("X8") + "000000040000000000000001" + body;
+            var submit = new SubmitSm(frame);
+            Assert.That(submit.RegisteredDelivery, Is.EqualTo(0x11));
+            Assert.That(submit.Body, Is.EqualTo("a"));
+            submit.Recipient = "3";
+            Assert.That(submit.EncodeM().Single(), Is.EqualTo(frame.Replace(addresses, "000501310001013300")));
+        }
+
+        [Test]
+        public void LoadingOutOfOrderParametersPreservesTheCollectionAndExistingTags()
+        {
+            var request = new DataSm();
+            request.tlv.Add("0427", "02");
+            var original = request.tlv;
+            request.LoadTLV("100100015A001e0002410004230003010203");
+            Assert.That(request.tlv, Is.SameAs(original));
+            Assert.That(request.tlv.Keys, Is.EqualTo(new[] { "001e", "0423", "0427", "1001" }));
+            Assert.That(request.tlv["001E"], Is.EqualTo("4100"));
+            Assert.Throws<ArgumentException>(() => request.LoadTLV("100200015A0427000101"));
+            Assert.That(request.tlv.ContainsKey("1002"), Is.False);
+            Assert.That(request.tlv["0427"], Is.EqualTo("02"));
+        }
+
+        [Test]
+        public void OptionalParameterParsingAllocatesInProportionToTheEncodedMessage()
+        {
+            // Ordinary vendor metadata preceding a payload must not copy that payload per tag.
+            string metadata = string.Concat(Enumerable.Range(0, 32).Select(i => $"{0x1500 + i:X4}000101"));
+            string parameters = metadata + "04240800" + new string('4', 4096);
+            var request = new DataSm();
+            request.LoadTLV("0427000101");
+#if !NETFRAMEWORK
+            long before = GC.GetAllocatedBytesForCurrentThread();
+#endif
+            request.LoadTLV(parameters);
+#if !NETFRAMEWORK
+            Assert.That(GC.GetAllocatedBytesForCurrentThread() - before, Is.LessThan(parameters.Length * 20L));
+#endif
+            Assert.That(request.tlv.Count, Is.EqualTo(34));
+        }
+
+        [TestCase("submit_sm_resp")]
+        [TestCase("bind_receiver_resp")]
+        [TestCase("bind_transmitter_resp")]
+        [TestCase("bind_transceiver_resp")]
+        public void RejectedSubmissionsAndBindsHaveHeaderOnlyResponses(string command)
+        {
+            Pdu response = command switch
+            {
+                "submit_sm_resp" => new SubmitSmResp { MessageID = "id" },
+                "bind_receiver_resp" => new BindReceiverResp(),
+                "bind_transmitter_resp" => new BindTransmitterResp(),
+                _ => new BindTransceiverResp()
+            };
+            response.command_status = 8;
+            string frame = response.Encode();
+            Assert.That(frame.Length, Is.EqualTo(32));
+            Assert.That(frame.Substring(0, 8), Is.EqualTo("00000010"));
+            response.command_status = 0;
+            Assert.That(response.Encode().Length, Is.GreaterThan(32));
+        }
+
         public static IEnumerable<Pdu> Responses()
         {
             yield return new BindReceiverResp();

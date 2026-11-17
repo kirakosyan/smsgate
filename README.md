@@ -25,16 +25,16 @@ SMSGate is a lightweight **SMPP 3.4 client and server library for .NET 10 and .N
 ## Install
 
 ```bash
-dotnet add package SMSGate --version 1.2.0
+dotnet add package SMSGate --version 1.3.0
 ```
 
-The NuGet package is named `SMSGate`; the assembly and namespaces are `Smpp`. Version 1.2.0 contains `net10.0` and `net472` assemblies; NuGet selects the appropriate target. For Framework applications, use PackageReference and enable automatic binding redirects. See the [Framework guide](https://github.com/kirakosyan/smsgate/blob/master/docs/FRAMEWORK_SUPPORT.md) for project setup, TLS options, and runtime validation.
+The NuGet package is named `SMSGate`; the assembly and namespaces are `Smpp`. Version 1.3.0 contains `net10.0` and `net472` assemblies; NuGet selects the appropriate target. For Framework applications, use PackageReference and enable automatic binding redirects. See the [Framework guide](https://github.com/kirakosyan/smsgate/blob/master/docs/FRAMEWORK_SUPPORT.md) for project setup, TLS options, and runtime validation.
 
 ## Supported platforms
 
 | Operating system | .NET 10 (`net10.0`) | .NET Framework 4.7.2+ (`net472`) | Validation |
 | --- | --- | --- | --- |
-| ![Windows](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows.svg) Windows | Supported | Supported in 1.2.0 | Debug/Release CI and package examples; Framework package validated on actual 4.7.2 and newer 4.8.1 runtimes |
+| ![Windows](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/windows.svg) Windows | Supported | Supported since 1.2.0 | Debug/Release CI and package examples; Framework package validated on actual 4.7.2 and newer 4.8.1 runtimes |
 | ![Linux](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/linux.svg) Linux | Supported | Windows only | Debug/Release .NET 10 tests and package examples in Ubuntu CI |
 | ![macOS](https://raw.githubusercontent.com/kirakosyan/smsgate/master/assets/branding/platforms/macos.svg) macOS | Not yet qualified | Windows only | No macOS CI lane |
 
@@ -143,7 +143,9 @@ Binding mode is selected from these flags before calling `Connect()`:
 
 Create one or more logical server channels with `Gate.AddServerConnection(...)`, then start the shared listener with `Server.StartAsync(ip, port)`.
 
-Each registered server channel acts as an allowed credential pair. During bind, the listener authenticates the inbound `system_id` and `password` against the configured server channels and routes the accepted session to the matching server object. Remote unbind, EOF, and timeout close the session while preserving its credential registration for a later bind. Explicit `Quit()` or `Server.Stop()` unregisters it.
+The listener admits up to 64 concurrent unauthenticated handshakes by default. Pass `maxPendingHandshakes` to the four-argument `Server.StartAsync` overload to tune this limit. Excess sockets are closed before TLS or SMPP authentication.
+
+Each registered server channel acts as an allowed credential pair. During bind, the listener authenticates the inbound `system_id` and `password` against the configured server channels and routes the accepted session to the matching server object. The server enforces the negotiated bind mode before submitting or accepting application messages. Set the server channel’s `direction_in` and `direction_out` flags before listening to restrict the account’s allowed directions. Remote unbind, EOF, and timeout close the session while preserving its credential registration for a later bind. Explicit `Quit()` or `Server.Stop()` unregisters it.
 
 `StartAsync` starts the listener before returning; startup errors are thrown to the caller. A second start while running is rejected. Each channel accepts one active session at a time, and a concurrent bind is rejected without replacing the existing socket. Transient accept errors retry with a short backoff. Unauthenticated binds use asynchronous reads with one ten-second deadline for the whole handshake; `Stop()` cancels pending handshakes.
 
@@ -202,7 +204,7 @@ For new clients, start with validated `SmppClientOptions` and `SubmissionOptions
 
 | Field | Default | Purpose |
 | --- | --- | --- |
-| `debug` | `false` | Includes raw PDU payloads in `ChannelEvent` logs; outgoing bind credentials are omitted |
+| `debug` | `false` | Includes raw PDU payloads in `ChannelEvent` logs. Bind and outbind credentials are redacted. |
 | `system_type` | `""` | SMPP system type |
 | `source_ton` / `source_npi` | `0` / `0` | Source addressing configuration |
 | `destination_ton` / `destination_npi` | `0` / `0` | Destination addressing configuration |

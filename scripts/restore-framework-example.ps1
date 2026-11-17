@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackageDirectory,
-    [string]$Version = '1.2.0'
+    [string]$Version = '1.3.0'
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent

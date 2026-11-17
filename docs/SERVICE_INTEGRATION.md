@@ -1,6 +1,6 @@
 # Running SMSGate in a service
 
-These APIs are available since SMSGate 1.1.0. Version 1.2.0 (currently unreleased) adds .NET Framework 4.7.2+ alongside .NET 10. The .NET 10 target adds no package dependencies; see [Framework setup](FRAMEWORK_SUPPORT.md) for Framework compatibility packages and binding redirects. The existing `Gate`, `Client`, `Server`, synchronous submissions, and event signatures remain available.
+These APIs are available since SMSGate 1.1.0. Version 1.2.0 added .NET Framework 4.7.2+ alongside .NET 10. The .NET 10 target adds no package dependencies; see [Framework setup](FRAMEWORK_SUPPORT.md) for Framework compatibility packages and binding redirects. The existing `Gate`, `Client`, `Server`, synchronous submissions, and event signatures remain available.
 
 ## An instance-owned client
 
@@ -100,6 +100,14 @@ dotnet run --project examples/WorkerService --configuration Release
 ```
 
 ## Metrics and structured events
+
+Each connection has a bounded callback queue. `MaxPendingNotifications` defaults to 2,048 inbound callbacks and a separate allowance of 2,048 observational callbacks. When the inbound allowance fills, the peer receives `ESME_RTHROTTLED` before acceptance. Queued inbound messages and receipts remain ordered. Diagnostic callbacks use at most half the observational allowance. Under overload, logs, metric samples, and observational submission and delivery status updates can be omitted. Monitor `DroppedNotifications` and use `SubmitAsync` results for submission decisions. Persist inbound work inside `InboundMessageHandler`.
+
+### Sending delivery reports
+
+Servers can call `await server.SubmitDeliveryReportAsync(id, status, cancellationToken)` to obtain the peer's raw SMPP response status. Zero means the peer accepted the report. A timeout, disconnect, or cancellation after a write leaves acceptance uncertain. `TrySubmitDeliveryReport` reports whether the transport write succeeded. The original synchronous `SubmitDeliveryReport` now throws on an invalid bind or failed write. The delivery tracking store expires retained entries even when every connection is offline.
+
+### Observing a connection
 
 `client.StateChanged` reports connecting, transport connected, bound, reconnecting, and stopped states. `client.Diagnostic` exposes named protocol events with sequence numbers and raw response statuses, without credentials, addresses, or message bodies. These callbacks use the same isolated notification dispatch as ordinary events. Sends capture the submitting caller's trace context independently; the persistent worker does not retain caller AsyncLocal values or logging scopes.
 

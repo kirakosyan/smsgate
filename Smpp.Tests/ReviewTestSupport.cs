@@ -86,7 +86,14 @@ namespace Smpp.Tests
         internal class ProbeConnection : Connection
         {
             internal int Reconnects;
-            internal ProbeConnection(GateEvents events = null) : base("probe", events ?? new GateEvents()) { }
+            internal ProbeConnection(GateEvents events = null, bool server = false, DeliveryTrackingStore store = null)
+                : base("probe", events ?? new GateEvents())
+            {
+                is_server = server;
+                if (store != null) DeliveryTrackingStore = store;
+                // Codec and dispatch fixtures model an already-bound peer without opening a network listener.
+                SetBindMode(Common.CommandId.bind_transceiver);
+            }
             protected override void ScheduleReconnect(int delayMilliseconds) => Interlocked.Increment(ref Reconnects);
             internal bool FailAcknowledgement;
             protected override int WriteAcknowledgement(string pdu) => FailAcknowledgement ? 502 : tcp_stream == null ? 0 : base.WriteAcknowledgement(pdu);
@@ -101,12 +108,13 @@ namespace Smpp.Tests
             public new void MessageHandler(object message) { base.MessageHandler(message); Drain(); }
             public new void SubmitDeliveryReport(string id, Common.MessageStatus status) { base.SubmitDeliveryReport(id, status); Drain(); }
             public new void Quit() { base.Quit(); Drain(); }
-            internal void Track(uint sequence, int id, DateTime submitted)
+            internal void Track(uint sequence, int id, DateTime submitted, uint expectedResponse = 0x80000004) =>
+                TrackParts(sequence, 1, id, submitted, expectedResponse);
+            internal void TrackParts(uint sequence, int count, int id, DateTime submitted, uint expectedResponse = 0x80000004)
             {
-                TryTrackSubmittedMessages(sequence, 1, new submitted_message { message_id = id, submitted_time = submitted });
-            }
-            internal void TrackParts(uint sequence, int count, int id, DateTime submitted) =>
                 TryTrackSubmittedMessages(sequence, count, new submitted_message { message_id = id, submitted_time = submitted });
+                submitted_messages[sequence].submission.ExpectedResponse = (Common.CommandId)expectedResponse;
+            }
             internal int SendDeliver(int id) => SendMessage(id, "1", "2", true, "deliver_sm", (sequence, reference) =>
                 new DeliverSm(new GateEvents()) { Sender = "1", Recipient = "2", Body = "hello", BodyFormat = "ascii", sequence_number = sequence }.EncodeM());
             internal void AgeSubmission(uint sequence)
@@ -132,12 +140,7 @@ namespace Smpp.Tests
             }
             internal void AgeMultipart()
             {
-                for (int i = 0; i < multipart_messages.Count; i++)
-                {
-                    var part = multipart_messages[i];
-                    part.submitted_dt = DateTime.UtcNow.AddMinutes(-10);
-                    multipart_messages[i] = part;
-                }
+                lock (SessionLock) ExpireMultipart(DateTime.UtcNow.AddMinutes(10));
             }
         }
 

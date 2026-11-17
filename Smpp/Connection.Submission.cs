@@ -72,6 +72,7 @@ namespace Smpp
                 if (stopped || draining) return EmptyResult(message, SubmissionOutcome.Stopped);
                 if (cancellationToken.IsCancellationRequested) return EmptyResult(message, SubmissionOutcome.Cancelled);
                 if (!connected) return EmptyResult(message, SubmissionOutcome.NotConnected);
+                if (!CanSendSubmission(SubmissionCommand)) return InvalidBindMode(message);
                 if (sendQueue == null)
                 {
                     submissionOptions.Validate();
@@ -122,6 +123,9 @@ namespace Smpp
             }
         }
 
+        private SubmissionResult InvalidBindMode(OutboundMessage message) =>
+            EmptyResult(message, SubmissionOutcome.Failed) with { ErrorMessage = "The negotiated bind mode does not permit this submission." };
+
         private async Task RunWorkAsync(SendWork work, SemaphoreSlim jobs)
         {
             SubmissionResult result = null;
@@ -160,7 +164,7 @@ namespace Smpp
             catch (Exception ex)
             {
                 Diagnose("submission.failed");
-                Notify(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Submission failed: " + ex.Message));
+                NotifyDiagnostic(() => Events.LogEvent(LogEvent.Level.Error, channel_name + " - Submission failed: " + ex.Message));
                 result = EmptyResult(work.Message, work.AttemptSent ? SubmissionOutcome.Unknown : SubmissionOutcome.Failed) with
                 { MayHaveBeenAccepted = work.AttemptSent, ErrorMessage = ex.Message, Attempts = work.AttemptNumber };
             }
@@ -185,6 +189,7 @@ namespace Smpp
             lock (SessionLock)
             {
                 if (stopped || !connected) return EmptyResult(request, stopped ? SubmissionOutcome.Stopped : SubmissionOutcome.NotConnected);
+                if (!CanSendSubmission(SubmissionCommand)) return InvalidBindMode(request);
                 token.ThrowIfCancellationRequested();
                 if (!AllocateSubmission(request.MessageId, request.Sender, request.Recipient, request.RequestDeliveryReport, SubmissionCommand,
                     (sequence, reference) => EncodeSubmission(request, sequence, reference), work.PartCount, true,
@@ -310,7 +315,7 @@ namespace Smpp
                 while (true)
                 {
                     lock (SessionLock)
-                        if (submitted_messages.Count == 0 && pendingAcknowledgements == 0 && Volatile.Read(ref activeAcceptanceHandlers) == 0) break;
+                        if (submitted_messages.Count == 0 && reportResponses.Count == 0 && pendingAcknowledgements == 0 && Volatile.Read(ref activeAcceptanceHandlers) == 0) break;
                     await Task.Delay(20, cancellationToken).ConfigureAwait(false);
                 }
             }

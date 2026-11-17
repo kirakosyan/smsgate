@@ -129,7 +129,7 @@ namespace Smpp
                     }
                     BeginSession(transport, false, stream);
                     installed = true;
-                    Notify(() => Events.LogChannelEvent(channel_name, "Connected to " + host + ":" + port));
+                    NotifyDiagnostic(() => Events.LogChannelEvent(channel_name, "Connected to " + host + ":" + port));
                     int result;
                     if (direction_in && direction_out)
                     {
@@ -171,7 +171,7 @@ namespace Smpp
                 {
                     retry = !stopped;
                     if (retry)
-                        Notify(() => Events.LogChannelEvent(channel_name, "Unable to connect to host: " + host + ":" + port + " - " + ex.Message));
+                        NotifyDiagnostic(() => Events.LogChannelEvent(channel_name, "Unable to connect to host: " + host + ":" + port + " - " + ex.Message));
                 }
                 return false;
             }

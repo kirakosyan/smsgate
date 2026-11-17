@@ -19,10 +19,10 @@ namespace Smpp.Tests
             internal readonly int Port;
             internal readonly string Channel = "review-server-" + Guid.NewGuid();
             internal readonly string Login = Guid.NewGuid().ToString("n").Substring(0, 8);
-            internal ServerHost(GateEvents events = null)
+            internal ServerHost(GateEvents events = null, int maxPendingHandshakes = 64)
             {
                 Server = new Gate(events ?? new GateEvents()).AddServerConnection(Channel, Login, "password");
-                Smpp.Server.StartAsync("127.0.0.1", 0);
+                Smpp.Server.StartAsync("127.0.0.1", 0, null, maxPendingHandshakes);
                 var listener = (TcpListener)typeof(Server).GetField("tcp_server", BindingFlags.Static | BindingFlags.NonPublic).GetValue(null);
                 Port = ((IPEndPoint)listener.LocalEndpoint).Port;
             }

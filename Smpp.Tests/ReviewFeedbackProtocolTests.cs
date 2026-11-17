@@ -54,14 +54,20 @@ namespace Smpp.Tests
             var messages = new ConcurrentQueue<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => messages.Enqueue(body);
-            using var peer = new ClientPeer(events: events);
-            peer.BindSuccessfully();
-            WritePdu(peer.Peer.GetStream(), MalformedRequest(command, failure) + Encode("submit", "good")[0]);
-            Assert.That(ReadPdu(peer.Peer.GetStream()), Is.EqualTo(Frame(0x80000000, status: 1)));
-            Assert.That(ReadPdu(peer.Peer.GetStream()).Substring(8, 16), Is.EqualTo("8000000400000000"));
+            using var host = command == "submit" ? new ServerHost(events) : null;
+            using var serverPeer = host?.Bind(9);
+            using var clientPeer = host == null ? new ClientPeer(events: events) : null;
+            clientPeer?.BindSuccessfully();
+            var stream = (serverPeer ?? clientPeer.Peer).GetStream();
+            WritePdu(stream, MalformedRequest(command, failure) + Encode(command, "good")[0]);
+            Assert.That(ReadPdu(stream), Is.EqualTo(Frame(0x80000000, status: 1)));
+            Assert.That(ReadPdu(stream).Substring(8, 16), Is.EqualTo(command switch
+            {
+                "submit" => "8000000400000000", "deliver" => "8000000500000000", _ => "8000010300000000"
+            }));
             WaitUntil(() => messages.Count == 1, "The complete frame after a malformed body must still be handled");
             Assert.That(messages.ToArray(), Is.EqualTo(new[] { "good" }));
-            Assert.That(peer.Client.connected, Is.True);
+            Assert.That((host?.Server as Connection ?? clientPeer.Client).connected, Is.True);
         }
 
         [TestCase("00000000")]
@@ -205,7 +211,7 @@ namespace Smpp.Tests
                     };
                     ((Connection)connection).MessageHandler(receipt.EncodeM()[0]);
                 }
-                else ((Connection)connection).MessageHandler(Encode("submit", "trigger")[0]);
+                else ((Connection)connection).MessageHandler(Encode("deliver", "trigger")[0]);
                 Assert.That(await completed.Task.WaitAsync(TimeSpan.FromSeconds(4)), Is.True, "Callbacks must run outside SessionLock");
             }
             finally { connection.Quit(); }
@@ -316,7 +322,7 @@ namespace Smpp.Tests
             var messages = new List<string>();
             var events = new GateEvents();
             events.NewMessageEvent += (_, _, _, _, body, _, _) => messages.Add(body);
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: true);
             try
             {
                 string a = new string('a', 180), b = new string('b', 180), c = new string('c', 180);

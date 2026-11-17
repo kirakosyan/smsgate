@@ -35,7 +35,8 @@ namespace Smpp.Responses
             int len = 0;
 
             response.Append(BuildHeader(Common.CommandId.submit_sm_resp, command_status, sequence_number));
-            response.Append(Common.StringToHex(message_id ?? "") + "00");
+            if (command_status == 0)
+                response.Append(Common.StringToHex(message_id ?? "") + "00");
 
             len = response.Length / 2 + 4;
 

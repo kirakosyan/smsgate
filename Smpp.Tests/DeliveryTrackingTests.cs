@@ -34,7 +34,7 @@ namespace Smpp.Tests
             events.MessagePartStatusEvent += parts.Add;
             events.MessageDeliveryStatusEvent += delivery.Add;
             using var pair = new SocketPair();
-            var connection = new ProbeConnection(events);
+            var connection = new ProbeConnection(events, server: true);
             try
             {
                 connection.Attach(pair.Local);

@@ -98,16 +98,28 @@ namespace Smpp
             return length;
         }
 
-        internal static string Decode(string hex, int coding, int esmClass, bool packed, out string multipartHeader, bool gsm7 = false)
+        internal static string Decode(string hex, int coding, int esmClass, bool packed, out string multipartHeader,
+            bool gsm7 = false, SortedList<string, object> parameters = null)
         {
             multipartHeader = "";
-            // A body that merely starts with these bytes is not a UDH unless UDHI is set.
-            if ((esmClass & 0x40) != 0 && hex.StartsWith("050003", StringComparison.OrdinalIgnoreCase))
+            int fillBits = 0;
+            if ((esmClass & 0x40) != 0)
             {
-                if (hex.Length < 12)
-                    throw new FormatException("Truncated concatenation header.");
-                multipartHeader = hex.Substring(0, 12);
-                hex = hex.Substring(12);
+                int headerBytes = ReadConcatenationHeader(hex, out multipartHeader);
+                if (multipartHeader.Length != 0)
+                {
+                    hex = hex.Substring(headerBytes * 2);
+                    fillBits = (7 - headerBytes * 8 % 7) % 7;
+                }
+            }
+            // SMPP 3.4 requires ignoring incomplete SAR parameter sets.
+            if (parameters != null && parameters.TryGetValue("020C", out var reference) &&
+                parameters.TryGetValue("020E", out var count) && parameters.TryGetValue("020F", out var index))
+            {
+                if ((esmClass & 0x40) != 0 || reference.ToString().Length != 4 ||
+                    count.ToString().Length != 2 || index.ToString().Length != 2)
+                    throw new FormatException("Invalid SAR parameters or conflicting user data header.");
+                multipartHeader = "060804" + reference + count + index;
             }
             if (coding == 2 || coding == 245)
                 return hex.ToUpperInvariant();
@@ -115,12 +127,53 @@ namespace Smpp
                 return new UnicodeEncoding(true, false, true).GetString(HexCodec.FromHexString(hex));
             if (packed && (coding == 0 || coding == 1))
             {
-                string septets = Unpack(hex, multipartHeader.Length > 0 ? 1 : 0, gsm7 && coding == 0);
+                string septets = Unpack(hex, fillBits, gsm7 && coding == 0);
                 return gsm7 && coding == 0 ? Gsm7Encoding.Decode(RuntimeCompatibility.Latin1.GetBytes(septets)) : septets;
             }
             if (gsm7 && coding == 0)
                 return Gsm7Encoding.Decode(HexCodec.FromHexString(hex));
             return coding == 0 || coding == 1 || coding == 3 ? Common.HexToString(hex) : hex.ToUpperInvariant();
+        }
+
+        private static int ReadConcatenationHeader(string hex, out string concatenation)
+        {
+            concatenation = "";
+            if (hex.Length < 2) throw new FormatException("Missing user data header.");
+            int headerBytes = 1 + Convert.ToInt32(hex.Substring(0, 2), 16);
+            int end = headerBytes * 2;
+            if (end > hex.Length) throw new FormatException("Truncated user data header.");
+            for (int offset = 2; offset < end;)
+            {
+                if (end - offset < 4) throw new FormatException("Truncated user data header element.");
+                int type = Convert.ToInt32(hex.Substring(offset, 2), 16);
+                int length = Convert.ToInt32(hex.Substring(offset + 2, 2), 16);
+                int next = offset + 4 + length * 2;
+                if (next > end) throw new FormatException("Truncated user data header element.");
+                if (type == 0 || type == 8)
+                {
+                    if (concatenation.Length != 0 || length != (type == 0 ? 3 : 4))
+                        throw new FormatException("Invalid concatenation information element.");
+                    concatenation = (type == 0 ? "050003" : "060804") + hex.Substring(offset + 4, length * 2);
+                }
+                offset = next;
+            }
+            return headerBytes;
+        }
+
+        internal static Common.MultipartMessage Multipart(string header, SortedList<string, object> parameters, Common.CommandId command,
+            string sender, string recipient, string format, string text)
+        {
+            int referenceLength = header.Length - 10;
+            bool sar = parameters.ContainsKey("020C") && parameters.ContainsKey("020E") && parameters.ContainsKey("020F");
+            return new Common.MultipartMessage
+            {
+                ReferenceKind = sar ? (byte)2 : referenceLength == 4 ? (byte)1 : (byte)0,
+                reference = Convert.ToInt32(header.Substring(6, referenceLength), 16),
+                num_of_parts = Convert.ToInt32(header.Substring(header.Length - 4, 2), 16),
+                part_num = Convert.ToInt32(header.Substring(header.Length - 2, 2), 16),
+                submitted_dt = DateTime.UtcNow, command = command, sender = sender,
+                recipient = recipient, body_format = format, short_message = text
+            };
         }
 
         private static string Pack(string body, int fillBits, bool gsm7)

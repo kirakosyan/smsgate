@@ -9,6 +9,7 @@ namespace Smpp
         private readonly Dictionary<string, LinkedListNode<(string Key, T Value, DateTime At)>> entries = new(StringComparer.Ordinal);
         private readonly LinkedList<(string Key, T Value, DateTime At)> order = new();
         internal int Count => entries.Count;
+        internal DateTime Oldest => order.First?.Value.At ?? DateTime.MaxValue;
         internal bool ContainsKey(string key) => entries.ContainsKey(key);
         internal bool TryGetValue(string key, out T value)
         {

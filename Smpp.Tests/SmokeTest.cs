@@ -109,7 +109,7 @@ namespace Smpp.Tests
             // Send delivery reports
             Thread.Sleep(1000);
             server.SubmitDeliveryReport("1", Common.MessageStatus.delivered_ACK_received);
-            client.SubmitDeliveryReport("2", Common.MessageStatus.delivered_ACK_received);
+            server2.SubmitDeliveryReport("2", Common.MessageStatus.delivered_ACK_received);
 
             // give some time 
             Thread.Sleep(2000);

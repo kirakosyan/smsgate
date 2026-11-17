@@ -2,6 +2,15 @@
 
 This project uses [Semantic Versioning](https://semver.org/). Released versions are tagged as `vMAJOR.MINOR.PATCH`.
 
+## 1.3.0 - 2026-11-17
+
+- Enforces negotiated SMPP roles and bind modes before transferring messages. Redacts incoming bind and outbind credentials and limits simultaneous unauthenticated handshakes.
+- Matches peer acknowledgements to written requests and their expected response commands. Unsent multipart segments and pending binds retain their reservations when unrelated responses arrive.
+- Validates and reserves multipart segments before acknowledging them. Bounds incomplete messages and recognizes SAR parameters, eight-bit and sixteen-bit concatenation headers.
+- Preserves PDU fields during decode and re-encode, corrects error response framing, and parses optional parameters without repeatedly copying the remaining frame.
+- Bounds callback backlogs and throttles inbound traffic while message consumers catch up. Observational overflow is visible through `DroppedNotifications`.
+- Adds `TrySubmitDeliveryReport` for transport outcomes and `SubmitDeliveryReportAsync` for the peer's response status. The existing `SubmitDeliveryReport` now signals invalid sessions and transport failures. Delivery tracking expires during outages.
+
 ## 1.2.0 - 2026-10-18
 
 - Adds a Windows .NET Framework 4.7.2 target alongside .NET 10. Framework 4.8 and 4.8.1 applications use the same `net472` assembly.
